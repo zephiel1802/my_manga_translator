@@ -30,6 +30,7 @@ from inpainting import (
     build_bubble_mask,
     build_text_block_crop_windows,
     build_text_block_removal_mask,
+    collect_item_inpaint_bboxes,
 )
 from translator.translator import MangaTranslator
 from translator.context_memory import ContextMemory
@@ -105,7 +106,7 @@ _INPAINTER_CACHE = {
     "lama_manga": None,
 }
 MAX_INPAINT_REGION_RATIO = 0.35
-INPAINT_BLOCK_PADDING = 8
+INPAINT_BLOCK_PADDING = 14
 RENDER_BLOCK_PADDING = 4
 
 def split_text_regions_by_bubble(text_regions):
@@ -198,7 +199,13 @@ def _select_item_inpaint_bbox(
     return None, huge_region_skipped, True
 
 
-def conservative_inner_text_bbox(bbox, image_shape, width_ratio=0.72, height_ratio=0.52):
+def conservative_inner_text_bbox(
+    bbox,
+    image_shape,
+    width_ratio=0.86,
+    height_ratio=0.70,
+    source_hints=None,
+):
     x1, y1, x2, y2 = [int(value) for value in bbox]
     width = max(1, x2 - x1)
     height = max(1, y2 - y1)
@@ -206,7 +213,7 @@ def conservative_inner_text_bbox(bbox, image_shape, width_ratio=0.72, height_rat
     center_y = y1 + (height / 2.0)
     inner_width = max(12, int(round(width * width_ratio)))
     inner_height = max(12, int(round(height * height_ratio)))
-    return expand_bbox(
+    inner_bbox = expand_bbox(
         (
             int(round(center_x - (inner_width / 2.0))),
             int(round(center_y - (inner_height / 2.0))),
@@ -216,6 +223,24 @@ def conservative_inner_text_bbox(bbox, image_shape, width_ratio=0.72, height_rat
         image_shape,
         0,
     )
+    if not source_hints:
+        return inner_bbox
+
+    bubble_area = max(1, bbox_area((x1, y1, x2, y2)))
+    hint_bboxes = [inner_bbox]
+    for hint_bbox in source_hints:
+        if hint_bbox is None:
+            continue
+        clamped_hint = clamp_bbox_to_image(hint_bbox, image_shape)
+        if bbox_area(clamped_hint) >= int(bubble_area * 0.92):
+            continue
+        hint_bboxes.append(clamped_hint)
+
+    merged_x1 = min(box[0] for box in hint_bboxes)
+    merged_y1 = min(box[1] for box in hint_bboxes)
+    merged_x2 = max(box[2] for box in hint_bboxes)
+    merged_y2 = max(box[3] for box in hint_bboxes)
+    return clamp_bbox_to_image((merged_x1, merged_y1, merged_x2, merged_y2), image_shape)
 
 
 def gather_render_item_text_regions(render_items):
@@ -249,6 +274,10 @@ def finalize_page_translation(image, render_items, translated_texts, font_path):
     page_image = image.copy()
     for render_item, translated_text in zip(render_items, translated_texts):
         render_item["translated_text"] = translated_text
+        render_item["resolved_inpaint_bboxes"] = collect_item_inpaint_bboxes(
+            render_item,
+            page_image.shape,
+        )
 
     text_mask = build_text_block_removal_mask(page_image.shape, render_items)
     bubble_mask = build_bubble_mask(page_image.shape, render_items)
@@ -257,18 +286,33 @@ def finalize_page_translation(image, render_items, translated_texts, font_path):
     if VERBOSE_LOG:
         page_pixels = max(1, int(page_image.shape[0]) * int(page_image.shape[1]))
         masked_pixels = int(np.count_nonzero(text_mask))
+        bubble_mask_pixels = int(np.count_nonzero(bubble_mask))
         block_inpaint_boxes = sum(1 for item in render_items if item.get("inpaint_bbox") is not None)
         fallback_boxes = sum(1 for item in render_items if item.get("inpaint_fallback_used"))
         huge_regions_skipped = sum(1 for item in render_items if item.get("huge_region_skipped"))
+        matched_items = sum(1 for item in render_items if item.get("text_regions"))
+        unmatched_items = sum(1 for item in render_items if not item.get("text_regions"))
         log(
             "LaMa page prep: "
             f"{len(render_items)} render items, "
             f"{block_inpaint_boxes} block inpaint boxes, "
             f"{masked_pixels}/{page_pixels} masked pixels, "
+            f"{bubble_mask_pixels}/{page_pixels} bubble-mask pixels, "
             f"{len(crop_windows)} crop windows, "
             f"{fallback_boxes} fallback inner-bbox masks, "
-            f"{huge_regions_skipped} huge regions skipped"
+            f"{huge_regions_skipped} huge regions skipped, "
+            f"{matched_items} matched items, "
+            f"{unmatched_items} no-matched-text items"
         )
+        for item in render_items:
+            log(
+                "  item "
+                f"{item.get('kind')} "
+                f"coords={item.get('coords')} "
+                f"inpaint_boxes={len(item.get('resolved_inpaint_bboxes') or [])} "
+                f"fallback={bool(item.get('inpaint_fallback_used'))} "
+                f"matched_text={len(item.get('text_regions') or [])}"
+            )
 
     try:
         final_image = get_lama_manga_inpainter().inpaint(
@@ -349,7 +393,11 @@ def build_bubble_render_item(image, bubble_region, matched_text_regions):
         matched_text_regions,
         image.shape,
     )
-    fallback_inner_bbox = conservative_inner_text_bbox(bubble_bbox, image.shape)
+    fallback_inner_bbox = conservative_inner_text_bbox(
+        bubble_bbox,
+        image.shape,
+        source_hints=[crop_data.get("ocr_bbox")],
+    )
     if text_block_bbox is not None:
         render_bbox = expand_bbox(text_block_bbox, image.shape, RENDER_BLOCK_PADDING)
     else:
@@ -365,6 +413,19 @@ def build_bubble_render_item(image, bubble_region, matched_text_regions):
         if region.reading_order is not None
     ]
     reading_order = min(reading_orders) if reading_orders else None
+    fallback_reason = None
+    inpaint_bboxes = []
+    if inpaint_bbox is not None:
+        inpaint_bboxes.append(inpaint_bbox)
+    inpaint_bboxes.append(render_bbox)
+    if text_block_bbox is not None:
+        inpaint_bboxes.append(text_block_bbox)
+        inpaint_bboxes.append(crop_data["ocr_bbox"])
+    else:
+        fallback_reason = "no_matched_text_regions"
+        inpaint_bboxes.append(fallback_inner_bbox)
+        if crop_data["ocr_bbox"] != bubble_bbox:
+            inpaint_bboxes.append(crop_data["ocr_bbox"])
     if inpaint_fallback_used:
         log(
             "No text block found for bubble; using fallback bubble inner bbox "
@@ -378,11 +439,13 @@ def build_bubble_render_item(image, bubble_region, matched_text_regions):
         "coords": bubble_bbox,
         "render_bbox": render_bbox,
         "inpaint_bbox": inpaint_bbox,
+        "inpaint_bboxes": inpaint_bboxes,
         "ocr_bbox": crop_data["ocr_bbox"],
         "ocr_crop": ocr_crop,
         "fallback_text_bbox": fallback_inner_bbox,
         "reading_order": reading_order,
         "inpaint_fallback_used": inpaint_fallback_used,
+        "fallback_reason": fallback_reason,
         "huge_region_skipped": huge_region_skipped,
     }
 
@@ -417,6 +480,7 @@ def build_outside_text_render_item(image, text_region, padding=6):
         "coords": region_bbox,
         "render_bbox": render_bbox,
         "inpaint_bbox": inpaint_bbox,
+        "inpaint_bboxes": [bbox for bbox in (inpaint_bbox, render_bbox, crop_data["ocr_bbox"], raw_bbox) if bbox is not None],
         "ocr_bbox": crop_data["ocr_bbox"],
         "ocr_crop": ocr_crop,
         "reading_order": text_region.reading_order,

@@ -45,6 +45,50 @@ def _to_mask_array(mask) -> "np.ndarray":
     return np_module.where(array > 0, 255, 0).astype(np_module.uint8)
 
 
+def _dilate_binary_mask(mask, dilation: int):
+    np_module = _require_numpy()
+    binary_mask = _to_mask_array(mask)
+    if dilation <= 0:
+        return binary_mask
+
+    cv2 = _get_cv2()
+    if cv2 is not None:
+        kernel = np_module.ones((dilation * 2 + 1, dilation * 2 + 1), dtype=np_module.uint8)
+        return cv2.dilate(binary_mask, kernel, iterations=1)
+
+    padded = np_module.pad(binary_mask, dilation, mode="constant", constant_values=0)
+    out = np_module.zeros_like(binary_mask)
+    for offset_y in range(dilation * 2 + 1):
+        for offset_x in range(dilation * 2 + 1):
+            out = np_module.maximum(
+                out,
+                padded[offset_y:offset_y + binary_mask.shape[0], offset_x:offset_x + binary_mask.shape[1]],
+            )
+    return out.astype(np_module.uint8)
+
+
+def _erode_binary_mask(mask, erosion: int):
+    np_module = _require_numpy()
+    binary_mask = _to_mask_array(mask)
+    if erosion <= 0:
+        return binary_mask
+
+    cv2 = _get_cv2()
+    if cv2 is not None:
+        kernel = np_module.ones((erosion * 2 + 1, erosion * 2 + 1), dtype=np_module.uint8)
+        return cv2.erode(binary_mask, kernel, iterations=1)
+
+    padded = np_module.pad(binary_mask, erosion, mode="constant", constant_values=0)
+    out = np_module.full_like(binary_mask, 255)
+    for offset_y in range(erosion * 2 + 1):
+        for offset_x in range(erosion * 2 + 1):
+            out = np_module.minimum(
+                out,
+                padded[offset_y:offset_y + binary_mask.shape[0], offset_x:offset_x + binary_mask.shape[1]],
+            )
+    return out.astype(np_module.uint8)
+
+
 def _clamp_box(box: Sequence[int], image_shape: Sequence[int]) -> BBox:
     height = int(image_shape[0])
     width = int(image_shape[1])
@@ -305,6 +349,115 @@ def crop_windows_from_text_regions(
     )
 
 
+def apply_bubble_fill_fast_path(
+    image_bgr,
+    text_mask,
+    bubble_mask,
+    *,
+    min_overlap_ratio: float = 0.65,
+    color_sample_erode: int = 3,
+    fill_dilate: int = 1,
+):
+    np_module = _require_numpy()
+    binary_text_mask = _to_mask_array(text_mask)
+    working_image = image_bgr.copy()
+    if bubble_mask is None:
+        return working_image, binary_text_mask, {
+            "components": 0,
+            "filled_components": 0,
+            "filled_pixels": 0,
+            "remaining_pixels": int(np_module.count_nonzero(binary_text_mask)),
+        }
+
+    binary_bubble_mask = _to_mask_array(bubble_mask)
+    if not np_module.any(binary_text_mask) or not np_module.any(binary_bubble_mask):
+        return working_image, binary_text_mask, {
+            "components": 0,
+            "filled_components": 0,
+            "filled_pixels": 0,
+            "remaining_pixels": int(np_module.count_nonzero(binary_text_mask)),
+        }
+
+    remaining_mask = binary_text_mask.copy()
+    component_boxes = boxes_from_mask(binary_text_mask)
+    filled_components = 0
+    filled_pixels = 0
+
+    for x1, y1, x2, y2 in component_boxes:
+        component_mask = binary_text_mask[y1:y2, x1:x2]
+        component_pixels = int(np_module.count_nonzero(component_mask))
+        if component_pixels <= 0:
+            continue
+
+        component_bubble_mask = binary_bubble_mask[y1:y2, x1:x2]
+        overlap_pixels = int(np_module.count_nonzero(
+            np_module.logical_and(component_mask > 0, component_bubble_mask > 0)
+        ))
+        overlap_ratio = overlap_pixels / float(component_pixels)
+        if overlap_ratio < float(min_overlap_ratio):
+            continue
+
+        sample_margin = max(int(color_sample_erode) * 3, int(fill_dilate) * 3, 6)
+        sample_x1 = max(0, x1 - sample_margin)
+        sample_y1 = max(0, y1 - sample_margin)
+        sample_x2 = min(binary_text_mask.shape[1], x2 + sample_margin)
+        sample_y2 = min(binary_text_mask.shape[0], y2 + sample_margin)
+
+        text_window = binary_text_mask[sample_y1:sample_y2, sample_x1:sample_x2]
+        bubble_window = binary_bubble_mask[sample_y1:sample_y2, sample_x1:sample_x2]
+        image_window = working_image[sample_y1:sample_y2, sample_x1:sample_x2]
+
+        component_window = np_module.zeros_like(text_window, dtype=np_module.uint8)
+        component_window[
+            y1 - sample_y1:y2 - sample_y1,
+            x1 - sample_x1:x2 - sample_x1,
+        ] = component_mask
+
+        bubble_sampling_mask = _erode_binary_mask(bubble_window, color_sample_erode)
+        if not np_module.any(bubble_sampling_mask):
+            bubble_sampling_mask = bubble_window
+
+        sample_ring = _dilate_binary_mask(component_window, max(2, color_sample_erode + fill_dilate))
+        sample_mask = np_module.logical_and(
+            bubble_sampling_mask > 0,
+            text_window == 0,
+        )
+        sample_mask = np_module.logical_and(sample_mask, sample_ring > 0)
+        if not np_module.any(sample_mask):
+            sample_mask = np_module.logical_and(
+                bubble_sampling_mask > 0,
+                text_window == 0,
+            )
+        if not np_module.any(sample_mask):
+            continue
+
+        sample_pixels = image_window[sample_mask]
+        if sample_pixels.size == 0:
+            continue
+        sampled_color = np_module.median(sample_pixels, axis=0)
+        fill_mask = _dilate_binary_mask(component_mask, fill_dilate)
+        fill_mask = np_module.where(
+            np_module.logical_and(fill_mask > 0, component_bubble_mask > 0),
+            255,
+            0,
+        ).astype(np_module.uint8)
+        if not np_module.any(fill_mask):
+            continue
+
+        fill_pixel_mask = fill_mask > 0
+        working_image[y1:y2, x1:x2][fill_pixel_mask] = np_module.clip(sampled_color, 0, 255).astype(np_module.uint8)
+        remaining_mask[y1:y2, x1:x2][fill_pixel_mask] = 0
+        filled_components += 1
+        filled_pixels += int(np_module.count_nonzero(fill_mask))
+
+    return working_image, remaining_mask, {
+        "components": len(component_boxes),
+        "filled_components": filled_components,
+        "filled_pixels": filled_pixels,
+        "remaining_pixels": int(np_module.count_nonzero(remaining_mask)),
+    }
+
+
 def _run_forward_padded(
     inpaint_forward: Callable,
     image,
@@ -408,7 +561,7 @@ def run_inpaint_crop(
 
     for window in windows:
         if crop_windows:
-            crop_image, crop_mask, crop_bounds = crop_box(output, working_mask, window, 0)
+            crop_image, crop_mask, crop_bounds = crop_box(output, working_mask, window, max(16, int(crop_margin)))
         else:
             crop_image, crop_mask, crop_bounds = crop_box(output, working_mask, window, crop_margin)
         if crop_mask.size == 0 or not np_module.any(crop_mask):
@@ -465,6 +618,7 @@ def run_inpaint_crop(
 
 
 __all__ = [
+    "apply_bubble_fill_fast_path",
     "boxes_from_mask",
     "clear_masked_region",
     "composite_masked",

@@ -11,6 +11,7 @@ from inpainting.masks import (
     build_text_block_crop_windows,
     build_text_block_removal_mask,
     build_text_removal_mask,
+    collect_item_inpaint_bboxes,
 )
 
 
@@ -40,6 +41,27 @@ class TestInpaintingMasks(unittest.TestCase):
         self.assertEqual(int(removal_mask[21, 21]), 255)
         self.assertEqual(int(removal_mask[13, 13]), 255)
         self.assertEqual(int(removal_mask[4, 4]), 0)
+
+    @unittest.skipIf(np is None, "numpy is not available")
+    def test_collect_item_inpaint_bboxes_includes_inpaint_render_and_ocr_boxes(self):
+        item = {
+            "kind": "outside_text",
+            "inpaint_bbox": (10, 10, 14, 14),
+            "render_bbox": (20, 20, 24, 24),
+            "ocr_bbox": (30, 30, 34, 34),
+            "text_regions": [],
+        }
+
+        bboxes = collect_item_inpaint_bboxes(
+            item,
+            (50, 50, 3),
+            block_padding=0,
+            min_padding=0,
+        )
+
+        self.assertIn((10, 10, 14, 14), bboxes)
+        self.assertIn((20, 20, 24, 24), bboxes)
+        self.assertIn((30, 30, 34, 34), bboxes)
 
     @unittest.skipIf(np is None, "numpy is not available")
     def test_region_mask_merges_without_shrinking_block_bbox(self):
@@ -135,6 +157,29 @@ class TestInpaintingMasks(unittest.TestCase):
         self.assertEqual(int(np.count_nonzero(removal_mask)), 0)
 
     @unittest.skipIf(np is None, "numpy is not available")
+    def test_huge_region_skipped_but_ocr_fallback_is_kept(self):
+        huge_region = TextRegion(bbox=(0, 0, 90, 90))
+
+        removal_mask = build_text_block_removal_mask(
+            (100, 100, 3),
+            [
+                {
+                    "kind": "outside_text",
+                    "text_region": huge_region,
+                    "text_regions": [huge_region],
+                    "huge_region_skipped": True,
+                    "ocr_bbox": (10, 10, 20, 20),
+                }
+            ],
+            block_padding=14,
+            min_padding=8,
+            dilation=0,
+        )
+
+        self.assertEqual(int(removal_mask[15, 15]), 255)
+        self.assertEqual(int(removal_mask[80, 80]), 0)
+
+    @unittest.skipIf(np is None, "numpy is not available")
     def test_dilation_expands_mask(self):
         text_region = TextRegion(bbox=(10, 10, 12, 12))
         render_items = [
@@ -151,19 +196,96 @@ class TestInpaintingMasks(unittest.TestCase):
         self.assertGreater(int(np.count_nonzero(dilated_mask)), int(np.count_nonzero(base_mask)))
 
     @unittest.skipIf(np is None, "numpy is not available")
+    def test_new_default_padding_and_dilation_are_stronger_than_old_defaults(self):
+        text_region = TextRegion(bbox=(20, 20, 24, 24))
+        render_items = [
+            {
+                "kind": "outside_text",
+                "text_region": text_region,
+                "text_regions": [text_region],
+            }
+        ]
+
+        old_mask = build_text_block_removal_mask(
+            (60, 60, 3),
+            render_items,
+            block_padding=8,
+            min_padding=4,
+            dilation=2,
+        )
+        new_mask = build_text_block_removal_mask(
+            (60, 60, 3),
+            render_items,
+            block_padding=14,
+            min_padding=8,
+            dilation=4,
+        )
+
+        self.assertGreater(int(np.count_nonzero(new_mask)), int(np.count_nonzero(old_mask)))
+
+    @unittest.skipIf(np is None, "numpy is not available")
+    def test_region_mask_is_merged_and_dilated(self):
+        glyph_mask = np.zeros((30, 30), dtype=np.uint8)
+        glyph_mask[14, 14] = 255
+        text_region = TextRegion(bbox=(10, 10, 12, 12), mask=glyph_mask)
+
+        removal_mask = build_text_block_removal_mask(
+            (30, 30, 3),
+            [
+                {
+                    "kind": "outside_text",
+                    "text_region": text_region,
+                    "text_regions": [text_region],
+                }
+            ],
+            block_padding=0,
+            min_padding=0,
+            dilation=0,
+            prefer_block_bbox=False,
+        )
+
+        self.assertEqual(int(removal_mask[14, 14]), 255)
+        self.assertEqual(int(removal_mask[13, 14]), 255)
+
+    @unittest.skipIf(np is None, "numpy is not available")
+    def test_mask_close_fills_small_holes(self):
+        ring_mask = np.zeros((30, 30), dtype=np.uint8)
+        ring_mask[10:20, 10:20] = 255
+        ring_mask[13:17, 13:17] = 0
+        text_region = TextRegion(bbox=(10, 10, 20, 20), mask=ring_mask)
+
+        removal_mask = build_text_block_removal_mask(
+            (30, 30, 3),
+            [
+                {
+                    "kind": "outside_text",
+                    "text_region": text_region,
+                    "text_regions": [text_region],
+                    "inpaint_bbox": None,
+                }
+            ],
+            block_padding=0,
+            min_padding=0,
+            dilation=0,
+            prefer_block_bbox=False,
+        )
+
+        self.assertEqual(int(removal_mask[15, 15]), 255)
+
+    @unittest.skipIf(np is None, "numpy is not available")
     def test_build_text_block_crop_windows_enlarges_and_merges(self):
         render_items = [
             {
                 "kind": "bubble",
-                "inpaint_bbox": (10, 10, 18, 18),
+                "inpaint_bboxes": [(10, 10, 18, 18)],
             },
             {
                 "kind": "bubble",
-                "inpaint_bbox": (18, 12, 26, 20),
+                "inpaint_bboxes": [(18, 12, 26, 20)],
             },
             {
                 "kind": "outside_text",
-                "inpaint_bbox": (70, 70, 78, 78),
+                "inpaint_bboxes": [(70, 70, 78, 78)],
             },
         ]
 
@@ -174,6 +296,21 @@ class TestInpaintingMasks(unittest.TestCase):
         self.assertLessEqual(windows[0][1], 10)
         self.assertGreaterEqual(windows[0][2], 26)
         self.assertGreaterEqual(windows[0][3], 20)
+
+    @unittest.skipIf(np is None, "numpy is not available")
+    def test_build_text_block_crop_windows_uses_all_item_bboxes(self):
+        render_items = [
+            {
+                "kind": "bubble",
+                "inpaint_bboxes": [(10, 10, 14, 14), (30, 30, 34, 34)],
+            }
+        ]
+
+        windows = build_text_block_crop_windows(render_items, (60, 60, 3))
+
+        self.assertEqual(len(windows), 2)
+        self.assertLessEqual(windows[0][0], 10)
+        self.assertGreaterEqual(windows[1][2], 34)
 
     @unittest.skipIf(np is None, "numpy is not available")
     def test_render_bbox_and_inpaint_bbox_can_differ(self):

@@ -18,7 +18,12 @@ except ModuleNotFoundError:
     nn = None
     F = None
 
-from .strategy import crop_windows_from_text_regions, run_inpaint_crop, run_inpaint_resize
+from .strategy import (
+    apply_bubble_fill_fast_path,
+    crop_windows_from_text_regions,
+    run_inpaint_crop,
+    run_inpaint_resize,
+)
 
 
 if nn is None:
@@ -435,12 +440,20 @@ class LamaMangaInpainter:
 
     def _run_model_on_patch(self, image_bgr, text_mask, bubble_mask=None):
         np_module = _require_numpy()
+        working_image, remaining_mask, _ = apply_bubble_fill_fast_path(
+            image_bgr,
+            text_mask,
+            bubble_mask,
+        )
+        if not np_module.any(remaining_mask):
+            return working_image
+
         self.load()
         if self._model is None or torch is None:
             raise LamaMangaUnavailable("LaMa Manga model is not loaded")
 
-        rgb_image = image_bgr[:, :, ::-1].astype(np_module.float32) / 255.0
-        mask_array = np_module.where(text_mask > 0, 1.0, 0.0).astype(np_module.float32)
+        rgb_image = working_image[:, :, ::-1].astype(np_module.float32) / 255.0
+        mask_array = np_module.where(remaining_mask > 0, 1.0, 0.0).astype(np_module.float32)
 
         image_tensor = torch.from_numpy(rgb_image.transpose(2, 0, 1)).unsqueeze(0).to(self.device, dtype=torch.float32)
         mask_tensor = torch.from_numpy(mask_array).unsqueeze(0).unsqueeze(0).to(self.device, dtype=torch.float32)
@@ -454,8 +467,8 @@ class LamaMangaInpainter:
             del mask_tensor
 
         output_bgr = np_module.clip(output_rgb[:, :, ::-1] * 255.0, 0, 255).astype(np_module.uint8)
-        output = image_bgr.copy()
-        output[text_mask > 0] = output_bgr[text_mask > 0]
+        output = working_image.copy()
+        output[remaining_mask > 0] = output_bgr[remaining_mask > 0]
         return output
 
     def inpaint(
