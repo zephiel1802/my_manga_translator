@@ -15,16 +15,19 @@ os.environ.setdefault("TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD", "1")
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 from ocr.easyocr_english import EnglishEasyOCR
 from detectors import (
+    TextRegion,
     detect_page_regions,
     detect_page_regions_layout_first,
 )
 from detectors.runtime_utils import (
     bubble_region_to_crop_data,
     clamp_bbox_to_image,
+    crop_bbox,
     expand_bbox,
     text_region_to_crop_data,
     union_text_regions_bbox,
 )
+from detectors.pp_doclayout_v3 import layout_regions_to_text_regions
 from inpainting import (
     LamaMangaInpainter,
     build_bubble_mask,
@@ -40,6 +43,11 @@ from PIL import Image
 import numpy as np
 import base64
 import cv2
+from render_item_utils import (
+    build_outside_text_blocks,
+    consolidate_render_items,
+    dedupe_ocr_items_by_text_and_geometry,
+)
 from text_rendering import choose_render_style_for_item, render_manga_text_block
 
 
@@ -417,15 +425,28 @@ def build_bubble_render_item(image, bubble_region, matched_text_regions):
     }
 
 
-def build_outside_text_render_item(image, text_region, padding=6):
-    crop_data = text_region_to_crop_data(
-        image,
-        text_region,
-        padding=padding,
-    )
-    region_bbox = crop_data["region_bbox"]
-    ocr_crop = crop_data["ocr_crop"].copy()
-    raw_bbox = clamp_bbox_to_image(text_region.bbox, image.shape)
+def build_outside_text_render_item(image, outside_block, padding=6):
+    if isinstance(outside_block, TextRegion):
+        base_region = outside_block
+        text_regions = [outside_block]
+        raw_bbox = clamp_bbox_to_image(outside_block.bbox, image.shape)
+        ocr_bbox = raw_bbox
+        outside_source = outside_block.detector or "outside_text"
+        reading_order = outside_block.reading_order
+        source_direction = None
+    else:
+        base_region = outside_block.get("text_region")
+        text_regions = list(outside_block.get("text_regions") or ([base_region] if base_region is not None else []))
+        raw_bbox = clamp_bbox_to_image(
+            outside_block.get("container_bbox") or outside_block.get("render_bbox") or base_region.bbox,
+            image.shape,
+        )
+        ocr_bbox = clamp_bbox_to_image(outside_block.get("ocr_bbox") or raw_bbox, image.shape)
+        outside_source = outside_block.get("outside_source", "outside_text")
+        reading_order = outside_block.get("reading_order", getattr(base_region, "reading_order", None))
+        source_direction = outside_block.get("source_direction")
+
+    ocr_crop = crop_bbox(image, ocr_bbox).copy()
     huge_region_skipped = is_huge_inpaint_bbox(raw_bbox, image.shape)
     render_padding = 0 if huge_region_skipped else 2
     render_bbox = expand_bbox(raw_bbox, image.shape, render_padding)
@@ -442,24 +463,36 @@ def build_outside_text_render_item(image, text_region, padding=6):
 
     return {
         "kind": "outside_text",
-        "text_region": text_region,
-        "text_regions": [text_region],
-        "coords": region_bbox,
+        "outside_source": outside_source,
+        "text_region": base_region,
+        "text_regions": text_regions,
+        "coords": raw_bbox,
+        "container_bbox": raw_bbox,
         "render_bbox": render_bbox,
         "inpaint_bbox": inpaint_bbox,
-        "inpaint_bboxes": [bbox for bbox in (inpaint_bbox, render_bbox, crop_data["ocr_bbox"], raw_bbox) if bbox is not None],
-        "ocr_bbox": crop_data["ocr_bbox"],
+        "inpaint_bboxes": [bbox for bbox in (inpaint_bbox, render_bbox, ocr_bbox, raw_bbox) if bbox is not None],
+        "ocr_bbox": ocr_bbox,
         "ocr_crop": ocr_crop,
-        "reading_order": text_region.reading_order,
+        "reading_order": reading_order,
+        "source_direction": source_direction,
         "inpaint_fallback_used": inpaint_fallback_used,
         "huge_region_skipped": huge_region_skipped,
     }
 
 
 def collect_page_render_items(image, page_detection_result):
-    text_regions_by_bubble, outside_text_regions = split_text_regions_by_bubble(
+    text_regions_by_bubble, _ = split_text_regions_by_bubble(
         page_detection_result.text_regions
     )
+    pp_text_regions = layout_regions_to_text_regions(
+        page_detection_result.layout_regions,
+        image.shape,
+    )
+    comic_text_regions = [
+        text_region
+        for text_region in page_detection_result.text_regions
+        if text_region.detector == "comic_text_detector"
+    ]
 
     render_items = []
     for bubble_idx, bubble_region in enumerate(page_detection_result.bubbles):
@@ -471,8 +504,38 @@ def collect_page_render_items(image, page_detection_result):
             )
         )
 
-    for text_region in outside_text_regions:
-        render_items.append(build_outside_text_render_item(image, text_region))
+    outside_blocks, outside_stats = build_outside_text_blocks(
+        pp_text_regions,
+        comic_text_regions,
+        page_detection_result.bubbles,
+        image.shape,
+        logger=log if VERBOSE_LOG else None,
+    )
+
+    outside_render_items = [
+        build_outside_text_render_item(image, outside_block)
+        for outside_block in outside_blocks
+    ]
+    render_items.extend(outside_render_items)
+
+    render_items = consolidate_render_items(
+        render_items,
+        image.shape,
+        logger=log if VERBOSE_LOG else None,
+    )
+
+    for render_item in render_items:
+        ocr_bbox = (
+            render_item.get("ocr_bbox")
+            or render_item.get("render_bbox")
+            or render_item.get("coords")
+        )
+        if ocr_bbox is None:
+            continue
+        ocr_bbox = clamp_bbox_to_image(ocr_bbox, image.shape)
+        render_item["ocr_bbox"] = ocr_bbox
+        ocr_crop = crop_bbox(image, ocr_bbox)
+        render_item["ocr_crop"] = ocr_crop.copy() if hasattr(ocr_crop, "copy") else ocr_crop
 
     render_items = [
         item
@@ -481,8 +544,22 @@ def collect_page_render_items(image, page_detection_result):
             key=lambda entry: render_item_sort_key(entry[1], entry[0]),
         )
     ]
+    if getattr(page_detection_result, "stats", None) is not None:
+        page_detection_result.stats["bubble_items"] = len(page_detection_result.bubbles)
+        page_detection_result.stats["pp_outside_blocks"] = outside_stats["pp_outside_blocks"]
+        page_detection_result.stats["comic_fallback_outside_blocks"] = outside_stats["comic_fallback_outside_blocks"]
+        page_detection_result.stats["outside_text_items"] = sum(
+            1 for item in render_items if item.get("kind") == "outside_text"
+        )
+        page_detection_result.stats["final_render_items"] = len(render_items)
 
-    return render_items, text_regions_by_bubble, outside_text_regions
+    outside_render_items = [
+        item
+        for item in render_items
+        if item.get("kind") == "outside_text"
+    ]
+
+    return render_items, text_regions_by_bubble, outside_render_items
 
 def split_long_image(image: np.ndarray, max_height_ratio: float = DEFAULT_SPLIT_HEIGHT_RATIO) -> list:
     """
@@ -548,6 +625,14 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
         im = Image.fromarray(render_item["ocr_crop"])
         text = mocr(im)
         texts_to_translate.append(text)
+
+    render_items, texts_to_translate = dedupe_ocr_items_by_text_and_geometry(
+        render_items,
+        texts_to_translate,
+        logger=log if VERBOSE_LOG else None,
+    )
+    if not render_items:
+        return image
     
     # Phase 2: Batch translate
     if selected_translator == "gemini" and len(texts_to_translate) > 1:
@@ -695,6 +780,7 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
     all_ocr_images = []
     ocr_mapping = []
     total_bubbles = 0
+    total_text_regions = 0
     total_outside_text_regions = 0
     
     for idx, img_data in enumerate(images_data):
@@ -706,13 +792,16 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         print(f"  [{idx+1}/{total_images}] {name}", end="", flush=True)
         
         page_detection_result = detect_page_regions_layout_first(image)
-        render_items, _, outside_text_regions = collect_page_render_items(
+        render_items, _, outside_render_items = collect_page_render_items(
             image,
             page_detection_result,
         )
+        page_stats = page_detection_result.stats or {}
         bubble_count = sum(1 for item in render_items if item["kind"] == "bubble")
-        outside_count = len(outside_text_regions)
+        text_region_count = len(page_detection_result.text_regions)
+        outside_count = len(outside_render_items)
         total_bubbles += bubble_count
+        total_text_regions += text_region_count
         total_outside_text_regions += outside_count
 
         all_pages_data[name] = {
@@ -721,7 +810,18 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
             'texts': []
         }
 
-        print(f" - {bubble_count} bubbles, {outside_count} outside text regions")
+        print(
+            " - "
+            f"raw_bubbles={page_stats.get('raw_bubbles', bubble_count)}, "
+            f"merged_bubbles={page_stats.get('merged_bubbles', bubble_count)}, "
+            f"raw_pp_text_regions={page_stats.get('raw_pp_text_regions', text_region_count)}, "
+            f"raw_comic_text_regions={page_stats.get('raw_comic_text_regions', text_region_count)}, "
+            f"pp_outside_blocks={page_stats.get('pp_outside_blocks', outside_count)}, "
+            f"comic_fallback_outside_blocks={page_stats.get('comic_fallback_outside_blocks', 0)}, "
+            f"bubble_items={page_stats.get('bubble_items', bubble_count)}, "
+            f"outside_text_items={page_stats.get('outside_text_items', outside_count)}, "
+            f"final_ocr_items={page_stats.get('final_render_items', len(render_items))}"
+        )
 
         for item_idx, render_item in enumerate(render_items):
             all_ocr_images.append(Image.fromarray(render_item["ocr_crop"]))
@@ -730,14 +830,14 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
     total_text_items = len(all_ocr_images)
     detection_time = time.time() - start_time
     print(
-        f"Detected {total_bubbles} bubbles and {total_outside_text_regions} outside text regions "
-        f"({total_text_items} total text items)"
+        f"Detected {total_bubbles} bubbles, {total_text_regions} text regions, "
+        f"{total_text_items} final OCR items ({total_outside_text_regions} outside text regions)"
     )
     emit_progress(
         'detection',
         total_images,
         total_images,
-        f'Detected {total_bubbles} bubbles and {total_outside_text_regions} outside text regions',
+        f'Detected {total_bubbles} bubbles, {total_text_regions} text regions, {total_text_items} final OCR items',
     )
     print(f"Page analysis completed in {detection_time:.1f}s ({total_text_items} text items)")
 
@@ -759,6 +859,16 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         # Map texts back to pages
         for (page_name, item_idx), text in zip(ocr_mapping, all_texts):
             all_pages_data[page_name]['texts'].append(text)
+
+        for page_name, page_data in all_pages_data.items():
+            deduped_items, deduped_texts = dedupe_ocr_items_by_text_and_geometry(
+                page_data['render_items'],
+                page_data['texts'],
+                logger=log if VERBOSE_LOG else None,
+            )
+            page_data['render_items'] = deduped_items
+            page_data['texts'] = deduped_texts
+        total_text_items = sum(len(page_data['render_items']) for page_data in all_pages_data.values())
         
         ocr_time = time.time() - ocr_start
         print(f"({ocr_time:.1f}s)")

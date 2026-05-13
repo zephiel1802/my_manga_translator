@@ -10,7 +10,13 @@ except ModuleNotFoundError:
     np = None
 
 from .base import BubbleRegion, TextRegion, bubble_region_from_legacy_detection
-from .matching import bbox_iou
+from .selection import (
+    bbox_area,
+    bbox_center,
+    bbox_intersection_area,
+    bbox_iou,
+    center_in_bbox,
+)
 
 
 def legacy_detection_to_bubble_region(result: Sequence[object]) -> BubbleRegion:
@@ -500,21 +506,84 @@ def _infer_image_shape_from_masks(mask_a, mask_b):
     return None
 
 
+def _mask_overlap_metrics(mask_a, mask_b, image_shape):
+    if np is None or image_shape is None or mask_a is None or mask_b is None:
+        return (0.0, 0.0)
+
+    np_module = _require_numpy()
+    normalized_a = normalize_binary_mask(mask_a, image_shape) > 0
+    normalized_b = normalize_binary_mask(mask_b, image_shape) > 0
+    area_a = int(np_module.count_nonzero(normalized_a))
+    area_b = int(np_module.count_nonzero(normalized_b))
+    if area_a <= 0 or area_b <= 0:
+        return (0.0, 0.0)
+
+    intersection = int(np_module.count_nonzero(normalized_a & normalized_b))
+    if intersection <= 0:
+        return (0.0, 0.0)
+
+    union = max(area_a + area_b - intersection, 1)
+    return (
+        float(intersection / union),
+        float(intersection / max(min(area_a, area_b), 1)),
+    )
+
+
 def merge_duplicate_bubble_regions(
     bubbles: Sequence[BubbleRegion],
     *,
-    iou_threshold: float = 0.5,
+    iou_threshold: float = 0.45,
     image_shape=None,
 ) -> list[BubbleRegion]:
     merged: list[BubbleRegion] = []
 
     for bubble in bubbles:
         match_index = None
-        best_iou = 0.0
+        best_score = 0.0
         for index, existing in enumerate(merged):
+            intersection = bbox_intersection_area(existing.bbox, bubble.bbox)
+            if intersection <= 0.0:
+                continue
+
+            bbox_overlap_ratio = float(
+                intersection
+                / max(min(bbox_area(existing.bbox), bbox_area(bubble.bbox)), 1.0)
+            )
             current_iou = bbox_iou(existing.bbox, bubble.bbox)
-            if current_iou >= iou_threshold and current_iou >= best_iou:
-                best_iou = current_iou
+            existing_center = bbox_center(existing.bbox)
+            bubble_center = bbox_center(bubble.bbox)
+            center_overlap = (
+                center_in_bbox(existing_center, bubble.bbox)
+                or center_in_bbox(bubble_center, existing.bbox)
+            )
+            merge_shape = (
+                image_shape
+                if image_shape is not None
+                else _infer_image_shape_from_masks(existing.mask, bubble.mask)
+            )
+            mask_iou, mask_overlap_ratio = _mask_overlap_metrics(
+                existing.mask,
+                bubble.mask,
+                merge_shape,
+            )
+            is_duplicate = (
+                current_iou >= float(iou_threshold)
+                or mask_iou >= 0.35
+                or bbox_overlap_ratio >= 0.80
+                or (center_overlap and bbox_overlap_ratio >= 0.65)
+                or mask_overlap_ratio >= 0.70
+            )
+            if not is_duplicate:
+                continue
+
+            current_score = max(
+                current_iou,
+                mask_iou,
+                bbox_overlap_ratio,
+                mask_overlap_ratio,
+            )
+            if current_score >= best_score:
+                best_score = current_score
                 match_index = index
 
         if match_index is None:
@@ -523,7 +592,11 @@ def merge_duplicate_bubble_regions(
 
         existing = merged[match_index]
         preferred = bubble if bubble.score > existing.score else existing
-        merge_shape = image_shape if image_shape is not None else _infer_image_shape_from_masks(existing.mask, bubble.mask)
+        merge_shape = (
+            image_shape
+            if image_shape is not None
+            else _infer_image_shape_from_masks(existing.mask, bubble.mask)
+        )
         merged[match_index] = BubbleRegion(
             bbox=_union_bbox(existing.bbox, bubble.bbox),
             score=max(existing.score, bubble.score),
@@ -596,6 +669,7 @@ def merge_duplicate_text_regions(
             confidence=max(existing.confidence, text_region.confidence),
             bubble_id=existing.bubble_id if existing.bubble_id is not None else text_region.bubble_id,
             reading_order=min(reading_orders) if reading_orders else None,
+            detector=preferred.detector if preferred.detector is not None else existing.detector or text_region.detector,
         )
 
     return merged

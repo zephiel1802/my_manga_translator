@@ -49,6 +49,7 @@ class TextRegion(Region):
     confidence: float = 1.0
     bubble_id: int | None = None
     reading_order: int | None = None
+    detector: str | None = None
 
     def __post_init__(self) -> None:
         Region.__post_init__(self)
@@ -58,6 +59,8 @@ class TextRegion(Region):
             self.bubble_id = int(self.bubble_id)
         if self.reading_order is not None:
             self.reading_order = int(self.reading_order)
+        if self.detector is not None:
+            self.detector = str(self.detector)
 
 
 @dataclass(slots=True)
@@ -83,6 +86,7 @@ class PageDetectionResult:
     text_regions: list[TextRegion] = field(default_factory=list)
     layout_regions: list[LayoutRegion] = field(default_factory=list)
     method: str = "legacy_yolo"
+    stats: dict[str, Any] = field(default_factory=dict)
 
     def to_legacy_detections(self) -> list[LegacyBubbleDetection]:
         legacy_detections: list[LegacyBubbleDetection] = []

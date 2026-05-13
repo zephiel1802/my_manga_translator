@@ -385,6 +385,7 @@ def layout_regions_to_text_regions(
                 confidence=region.score,
                 bubble_id=None,
                 reading_order=region.reading_order,
+                detector="pp_doclayout_v3",
             )
         )
 

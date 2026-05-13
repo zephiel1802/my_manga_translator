@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from .base import PageDetectionResult, TextRegion
 from .comic_text_detector import get_comic_text_detector
-from .matching import assign_text_regions_to_bubbles, bbox_iou
+from .matching import assign_text_regions_to_bubbles
 from .pp_doclayout_v3 import (
     get_pp_doclayout_v3_detector,
     layout_regions_to_text_regions,
 )
-from .runtime_utils import merge_duplicate_text_regions
+from .runtime_utils import merge_duplicate_bubble_regions
+from .selection import dedupe_text_regions_koharu_style, sort_manga_reading_order
 from .yolov8_seg_bubble import get_yolov8_seg_bubble_detector
 
 
@@ -16,32 +17,15 @@ def merge_text_region_candidates(
     comic_text_regions,
     *,
     image_shape,
-    iou_threshold: float = 0.5,
+    iou_threshold: float = 0.35,
 ) -> list[TextRegion]:
-    merged_comic = merge_duplicate_text_regions(
-        comic_text_regions,
-        iou_threshold=iou_threshold,
+    merged_regions = dedupe_text_regions_koharu_style(
+        list(pp_text_regions) + list(comic_text_regions),
         image_shape=image_shape,
+        iou_threshold=iou_threshold,
+        prefer_comic=True,
     )
-
-    merged_regions: list[TextRegion] = list(merged_comic)
-    for pp_region in pp_text_regions:
-        if any(bbox_iou(pp_region.bbox, comic_region.bbox) >= iou_threshold for comic_region in merged_comic):
-            continue
-        merged_regions.append(pp_region)
-
-    return [
-        region
-        for _, region in sorted(
-            enumerate(merged_regions),
-            key=lambda item: (
-                item[1].reading_order if item[1].reading_order is not None else 10**9,
-                item[1].bbox[1],
-                item[1].bbox[0],
-                item[0],
-            ),
-        )
-    ]
+    return sort_manga_reading_order(merged_regions, order="ltr")
 
 
 def detect_page_regions_layout_first(
@@ -70,7 +54,11 @@ def detect_page_regions_layout_first(
         layout_regions,
         image.shape,
     )
-    bubbles = active_bubble_detector.detect_segmented_bubble_regions(image)
+    raw_bubbles = active_bubble_detector.detect_segmented_bubble_regions(image)
+    bubbles = merge_duplicate_bubble_regions(
+        raw_bubbles,
+        image_shape=image.shape,
+    )
     comic_text_regions = active_text_detector.detect_text_regions(image)
     merged_text_regions = merge_text_region_candidates(
         pp_text_regions,
@@ -87,6 +75,14 @@ def detect_page_regions_layout_first(
         text_regions=matched_text_regions,
         layout_regions=layout_regions,
         method="pp_doclayout_v3_text_source+yolov8_seg_bubble+comic_text_detector",
+        stats={
+            "raw_bubbles": getattr(active_bubble_detector, "last_raw_bubble_count", len(raw_bubbles)),
+            "merged_bubbles": getattr(active_bubble_detector, "last_merged_bubble_count", len(bubbles)),
+            "raw_pp_text_regions": len(pp_text_regions),
+            "raw_comic_text_regions": len(comic_text_regions),
+            "merged_text_regions": len(merged_text_regions),
+            "matched_text_regions": len(matched_text_regions),
+        },
     )
 
 

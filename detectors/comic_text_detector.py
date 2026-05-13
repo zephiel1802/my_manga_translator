@@ -120,6 +120,9 @@ def normalize_text_detection(
         mask = raw.get("mask")
         reading_order = raw.get("reading_order")
         bubble_id = raw.get("bubble_id")
+        detector = raw.get("detector")
+    else:
+        detector = None
 
     return TextRegion(
         bbox=bbox,
@@ -129,6 +132,7 @@ def normalize_text_detection(
         confidence=confidence,
         bubble_id=bubble_id,
         reading_order=reading_order,
+        detector=None if detector is None else str(detector),
     )
 
 
@@ -262,10 +266,14 @@ class ComicTextDetector:
             self.load()
 
         raw_detections = self._backend.detect(image)
-        return normalize_text_detections(
+        normalized = normalize_text_detections(
             raw_detections,
             confidence_threshold=self.confidence_threshold,
         )
+        return [
+            replace(region, detector="comic_text_detector")
+            for region in normalized
+        ]
 
     def detect_text_regions_in_rois(self, image, layout_rois) -> list[TextRegion]:
         mapped_regions: list[TextRegion] = []

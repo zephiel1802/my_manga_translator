@@ -211,6 +211,60 @@ class TestYoloSegBubbleNormalization(unittest.TestCase):
         self.assertEqual(bubbles[1].bbox, (6, 4, 9, 7))
         self.assertTrue(bubbles[1].is_dark)
 
+    @unittest.skipIf(np is None, "numpy is not available")
+    def test_detector_merges_duplicate_bubbles_after_full_page_inference(self):
+        image = np.zeros((10, 12, 3), dtype=np.uint8) + 240
+
+        duplicate_result = types.SimpleNamespace(
+            boxes=types.SimpleNamespace(
+                xyxy=FakeTensor(
+                    [
+                        [1, 1, 7, 7],
+                        [2, 2, 8, 8],
+                    ]
+                ),
+                conf=FakeTensor([0.85, 0.92]),
+                cls=FakeTensor([0, 0]),
+            ),
+            masks=types.SimpleNamespace(
+                data=FakeTensor(
+                    np.array(
+                        [
+                            [
+                                [0, 1, 1, 1],
+                                [1, 1, 1, 1],
+                                [1, 1, 1, 0],
+                                [0, 1, 0, 0],
+                            ],
+                            [
+                                [0, 1, 1, 0],
+                                [1, 1, 1, 1],
+                                [1, 1, 1, 1],
+                                [0, 1, 1, 0],
+                            ],
+                        ],
+                        dtype=np.float32,
+                    )
+                )
+            ),
+        )
+
+        class FakeModel:
+            def predict(self, **kwargs):
+                return [duplicate_result]
+
+        detector = YoloSegBubbleDetector()
+        detector._model = FakeModel()
+        detector.device = "cpu"
+
+        bubbles = detector.detect_segmented_bubble_regions(image)
+
+        self.assertEqual(detector.last_raw_bubble_count, 2)
+        self.assertEqual(detector.last_merged_bubble_count, 1)
+        self.assertEqual(len(bubbles), 1)
+        self.assertEqual(bubbles[0].bbox, (1, 1, 8, 8))
+        self.assertEqual(bubbles[0].score, 0.92)
+
 
 class FakeYoloSegBubbleDetector(YoloSegBubbleDetector):
     def __init__(self):

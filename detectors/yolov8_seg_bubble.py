@@ -234,6 +234,8 @@ class YoloSegBubbleDetector:
         self.iou = float(iou)
         self.device = device
         self._model = None
+        self.last_raw_bubble_count = 0
+        self.last_merged_bubble_count = 0
 
     def _resolve_model_path(self) -> Path:
         if self.model_path:
@@ -281,6 +283,13 @@ class YoloSegBubbleDetector:
         bubbles: list[BubbleRegion] = []
         for result in results:
             bubbles.extend(normalize_yolov8_segmentation_result(result, image))
+
+        self.last_raw_bubble_count = len(bubbles)
+        bubbles = merge_duplicate_bubble_regions(
+            bubbles,
+            image_shape=image.shape,
+        )
+        self.last_merged_bubble_count = len(bubbles)
 
         return [
             bubble

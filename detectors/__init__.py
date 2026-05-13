@@ -19,6 +19,11 @@ from .matching import (
     point_in_bbox,
     point_in_mask,
 )
+from .selection import (
+    dedupe_text_regions_koharu_style,
+    overlap_over_area,
+    sort_manga_reading_order,
+)
 from .pp_doclayout_v3 import PPDocLayoutV3Detector
 
 
@@ -154,12 +159,15 @@ __all__ = [
     "bbox_iou",
     "point_in_bbox",
     "point_in_mask",
+    "overlap_over_area",
     "ComicTextDetector",
     "ComicTextDetectorUnavailable",
+    "dedupe_text_regions_koharu_style",
     "get_comic_text_detector",
     "get_pp_doclayout_v3_detector",
     "get_yolov8_seg_bubble_detector",
     "normalize_text_detection",
     "normalize_text_detections",
     "PPDocLayoutV3Detector",
+    "sort_manga_reading_order",
 ]
