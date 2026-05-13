@@ -27,12 +27,12 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8088
 DEFAULT_TIMEOUT = 120
 DEFAULT_CTX = 4096
-DEFAULT_MAX_NEW_TOKENS = 256
+DEFAULT_MAX_NEW_TOKENS = 2048
 DEFAULT_TEMPERATURE = 0.0
-DEFAULT_PROMPT = (
-    "Recognize all text in this image crop. "
-    "Return only the exact text, no explanation."
-)
+DEFAULT_PROMPT = "OCR: "
+DEFAULT_MIN_SHORT_SIDE = 512
+DEFAULT_MAX_LONG_SIDE = 2048
+DEFAULT_IMAGE_PAD = 12
 
 
 class PaddleOCRVLError(RuntimeError):
@@ -186,6 +186,8 @@ def _build_llama_server_command(
         str(int(port)),
         "-c",
         str(int(num_ctx)),
+        "--temp",
+        "0",
     ]
     if gpu_layers is not None:
         command.extend(["-ngl", str(int(gpu_layers))])
@@ -230,6 +232,10 @@ class PaddleOCRVLOCR:
         temperature: float = DEFAULT_TEMPERATURE,
         num_ctx: int = DEFAULT_CTX,
         gpu_layers: int | None = None,
+        min_short_side: int | None = None,
+        max_long_side: int | None = None,
+        image_pad: int | None = None,
+        prompt: str | None = None,
     ):
         self.server_url = (
             (server_url or os.environ.get("PADDLEOCR_VL_SERVER_URL") or f"http://{host}:{port}")
@@ -251,6 +257,62 @@ class PaddleOCRVLOCR:
         self._server_command: list[str] | None = None
         self._cli_command: list[str] | None = None
 
+        self.prompt = (
+        prompt
+        or os.environ.get("PADDLEOCR_VL_PROMPT")
+        or DEFAULT_PROMPT
+        )
+
+        self.min_short_side = int(
+            min_short_side
+            or os.environ.get("PADDLEOCR_VL_MIN_SHORT_SIDE", DEFAULT_MIN_SHORT_SIDE)
+        )
+
+        self.max_long_side = int(
+            max_long_side
+            or os.environ.get("PADDLEOCR_VL_MAX_LONG_SIDE", DEFAULT_MAX_LONG_SIDE)
+        )
+
+        self.image_pad = int(
+            image_pad
+            or os.environ.get("PADDLEOCR_VL_PAD", DEFAULT_IMAGE_PAD)
+        )
+    
+    def _preprocess_ocr_image(self, pil_image: Image.Image) -> Image.Image:
+        image = pil_image.convert("RGB")
+
+        if self.image_pad > 0:
+            padded = Image.new(
+                "RGB",
+                (image.width + self.image_pad * 2, image.height + self.image_pad * 2),
+                "white",
+            )
+            padded.paste(image, (self.image_pad, self.image_pad))
+            image = padded
+
+        width, height = image.size
+        if width <= 0 or height <= 0:
+            return image
+
+        short_side = min(width, height)
+        long_side = max(width, height)
+
+        scale = 1.0
+
+        if short_side < self.min_short_side:
+            scale = max(scale, self.min_short_side / short_side)
+
+        if long_side * scale > self.max_long_side:
+            scale = self.max_long_side / long_side
+
+        if abs(scale - 1.0) > 0.01:
+            new_width = max(1, int(round(width * scale)))
+            new_height = max(1, int(round(height * scale)))
+            image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+        return image
+    
+    
     def __call__(self, image) -> str:
         return self.recognize(image)
 
@@ -266,6 +328,7 @@ class PaddleOCRVLOCR:
 
     def _image_to_base64_png(self, image) -> str:
         pil_image = self._normalize_image(image)
+        pil_image = self._preprocess_ocr_image(pil_image)
         buffer = io.BytesIO()
         pil_image.save(buffer, format="PNG")
         return base64.b64encode(buffer.getvalue()).decode("ascii")
@@ -343,7 +406,7 @@ class PaddleOCRVLOCR:
             "--image",
             str(image_path),
             "-p",
-            DEFAULT_PROMPT,
+            self.prompt,
             "-c",
             str(self.num_ctx),
         ] + (["-ngl", str(int(self.gpu_layers))] if self.gpu_layers is not None else [])
@@ -410,11 +473,11 @@ class PaddleOCRVLOCR:
                 {
                     "role": "user",
                     "content": [
-                        {"type": "text", "text": DEFAULT_PROMPT},
                         {
                             "type": "image_url",
                             "image_url": {"url": f"data:image/png;base64,{image_b64}"},
                         },
+                        {"type": "text", "text": DEFAULT_PROMPT},
                     ],
                 }
             ],
