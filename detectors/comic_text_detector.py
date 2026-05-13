@@ -94,6 +94,70 @@ def _extract_confidence(raw: Any) -> float:
     return 1.0
 
 
+def _infer_source_direction_from_bbox(
+    bbox: tuple[int, int, int, int],
+) -> str:
+    width = max(1, int(bbox[2]) - int(bbox[0]))
+    height = max(1, int(bbox[3]) - int(bbox[1]))
+    return "vertical" if height >= (width * 1.15) else "horizontal"
+
+
+def _infer_detected_font_size(
+    bbox: tuple[int, int, int, int],
+) -> float:
+    width = max(1, int(bbox[2]) - int(bbox[0]))
+    height = max(1, int(bbox[3]) - int(bbox[1]))
+    return float(min(width, height))
+
+
+def _bbox_to_polygon(
+    bbox: Sequence[int | float],
+) -> list[list[int]]:
+    x1, y1, x2, y2 = [int(value) for value in bbox[:4]]
+    return [[x1, y1], [x2, y1], [x2, y2], [x1, y2]]
+
+
+def _normalize_line_polygons(
+    line_polygons,
+    *,
+    line_bboxes=None,
+) -> list[list[list[int]]] | None:
+    polygons: list[list[list[int]]] = []
+
+    raw_items = []
+    if line_polygons:
+        if (
+            isinstance(line_polygons, (list, tuple))
+            and line_polygons
+            and isinstance(line_polygons[0], (list, tuple))
+            and len(line_polygons[0]) >= 2
+            and isinstance(line_polygons[0][0], (int, float))
+        ):
+            raw_items = [line_polygons]
+        else:
+            raw_items = list(line_polygons)
+
+    for polygon in raw_items:
+        normalized_polygon: list[list[int]] = []
+        try:
+            for point in polygon:
+                if len(point) < 2:
+                    continue
+                normalized_polygon.append([int(point[0]), int(point[1])])
+        except TypeError:
+            continue
+        if len(normalized_polygon) >= 4:
+            polygons.append(normalized_polygon)
+
+    if not polygons and line_bboxes:
+        for bbox in line_bboxes:
+            if bbox is None or len(bbox) < 4:
+                continue
+            polygons.append(_bbox_to_polygon(bbox))
+
+    return polygons or None
+
+
 def normalize_text_detection(
     raw: Any,
     confidence_threshold: float = 0.3,
@@ -114,6 +178,11 @@ def normalize_text_detection(
     mask = None
     reading_order = None
     bubble_id = None
+    line_polygons = None
+    line_bboxes = None
+    source_direction = None
+    rotation_deg = None
+    detected_font_size_px = None
 
     if isinstance(raw, dict):
         text = str(raw.get("text", ""))
@@ -121,8 +190,28 @@ def normalize_text_detection(
         reading_order = raw.get("reading_order")
         bubble_id = raw.get("bubble_id")
         detector = raw.get("detector")
+        line_polygons = raw.get("line_polygons")
+        line_bboxes = raw.get("line_bboxes")
+        source_direction = raw.get("source_direction")
+        rotation_deg = raw.get("rotation_deg")
+        detected_font_size_px = raw.get("detected_font_size_px")
     else:
         detector = None
+
+    normalized_line_polygons = _normalize_line_polygons(
+        line_polygons,
+        line_bboxes=line_bboxes,
+    )
+    inferred_source_direction = (
+        str(source_direction)
+        if source_direction not in (None, "")
+        else _infer_source_direction_from_bbox(bbox)
+    )
+    inferred_font_size = (
+        float(detected_font_size_px)
+        if detected_font_size_px not in (None, "")
+        else _infer_detected_font_size(bbox)
+    )
 
     return TextRegion(
         bbox=bbox,
@@ -132,7 +221,11 @@ def normalize_text_detection(
         confidence=confidence,
         bubble_id=bubble_id,
         reading_order=reading_order,
-        detector=None if detector is None else str(detector),
+        detector="comic_text_detector" if detector is None else str(detector),
+        line_polygons=normalized_line_polygons,
+        source_direction=inferred_source_direction,
+        rotation_deg=None if rotation_deg is None else float(rotation_deg),
+        detected_font_size_px=inferred_font_size,
     )
 
 
@@ -144,7 +237,19 @@ def normalize_text_detections(
 
     for raw_detection in raw_detections:
         if isinstance(raw_detection, TextRegion):
-            region = raw_detection
+            region = replace(
+                raw_detection,
+                detector=raw_detection.detector or "comic_text_detector",
+                source_direction=(
+                    raw_detection.source_direction
+                    or _infer_source_direction_from_bbox(raw_detection.bbox)
+                ),
+                detected_font_size_px=(
+                    raw_detection.detected_font_size_px
+                    if raw_detection.detected_font_size_px is not None
+                    else _infer_detected_font_size(raw_detection.bbox)
+                ),
+            )
             if region.confidence < confidence_threshold:
                 continue
             if region.bbox[2] <= region.bbox[0] or region.bbox[3] <= region.bbox[1]:
@@ -239,6 +344,9 @@ class ComicTextDetector:
         self.lazy_load = lazy_load
         self.kwargs = kwargs
         self._backend = None
+        self.last_raw_comic_text_blocks = 0
+        self.last_raw_comic_line_regions = 0
+        self.last_comic_grouped_from_lines = 0
 
         if not self.lazy_load:
             self.load()
@@ -266,12 +374,33 @@ class ComicTextDetector:
             self.load()
 
         raw_detections = self._backend.detect(image)
+        self.last_raw_comic_text_blocks = int(
+            getattr(self._backend, "last_block_region_count", 0)
+        )
+        self.last_raw_comic_line_regions = int(
+            getattr(self._backend, "last_line_region_count", 0)
+        )
+        self.last_comic_grouped_from_lines = int(
+            getattr(self._backend, "last_grouped_from_lines_count", 0)
+        )
         normalized = normalize_text_detections(
             raw_detections,
             confidence_threshold=self.confidence_threshold,
         )
         return [
-            replace(region, detector="comic_text_detector")
+            replace(
+                region,
+                detector=region.detector or "comic_text_detector",
+                source_direction=(
+                    region.source_direction
+                    or _infer_source_direction_from_bbox(region.bbox)
+                ),
+                detected_font_size_px=(
+                    region.detected_font_size_px
+                    if region.detected_font_size_px is not None
+                    else _infer_detected_font_size(region.bbox)
+                ),
+            )
             for region in normalized
         ]
 

@@ -50,6 +50,10 @@ class TextRegion(Region):
     bubble_id: int | None = None
     reading_order: int | None = None
     detector: str | None = None
+    line_polygons: Any | None = None
+    source_direction: str | None = None
+    rotation_deg: float | None = None
+    detected_font_size_px: float | None = None
 
     def __post_init__(self) -> None:
         Region.__post_init__(self)
@@ -61,6 +65,12 @@ class TextRegion(Region):
             self.reading_order = int(self.reading_order)
         if self.detector is not None:
             self.detector = str(self.detector)
+        if self.source_direction is not None:
+            self.source_direction = str(self.source_direction)
+        if self.rotation_deg is not None:
+            self.rotation_deg = float(self.rotation_deg)
+        if self.detected_font_size_px is not None:
+            self.detected_font_size_px = float(self.detected_font_size_px)
 
 
 @dataclass(slots=True)

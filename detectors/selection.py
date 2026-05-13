@@ -205,6 +205,25 @@ def _union_bbox(
     )
 
 
+def _merge_line_polygons(primary, secondary):
+    merged = []
+    seen = set()
+    for source in (primary, secondary):
+        if not source:
+            continue
+        for polygon in source:
+            normalized_polygon = tuple(
+                (int(point[0]), int(point[1]))
+                for point in polygon
+                if len(point) >= 2
+            )
+            if len(normalized_polygon) < 4 or normalized_polygon in seen:
+                continue
+            seen.add(normalized_polygon)
+            merged.append([[point[0], point[1]] for point in normalized_polygon])
+    return merged or None
+
+
 def _merge_text_regions(
     existing: TextRegion,
     candidate: TextRegion,
@@ -248,6 +267,17 @@ def _merge_text_regions(
         bubble_id=existing.bubble_id if existing.bubble_id is not None else candidate.bubble_id,
         reading_order=min(merged_reading_order_candidates) if merged_reading_order_candidates else None,
         detector=preferred.detector if preferred.detector is not None else alternate.detector,
+        line_polygons=_merge_line_polygons(
+            preferred.line_polygons,
+            alternate.line_polygons,
+        ),
+        source_direction=preferred.source_direction or alternate.source_direction,
+        rotation_deg=preferred.rotation_deg if preferred.rotation_deg is not None else alternate.rotation_deg,
+        detected_font_size_px=(
+            preferred.detected_font_size_px
+            if preferred.detected_font_size_px is not None
+            else alternate.detected_font_size_px
+        ),
     )
 
 

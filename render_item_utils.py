@@ -18,6 +18,7 @@ from detectors.selection import (
     overlap_over_area,
     sort_manga_reading_order,
 )
+from detectors.text_block_geometry import expanded_text_block_crop_bounds
 
 
 def _log(logger: Callable[[str], None] | None, message: str) -> None:
@@ -194,19 +195,28 @@ def _choose_outside_ocr_bbox(
     if not evidence_regions:
         return clamp_bbox_to_image(container_bbox, image_shape)
 
-    x1 = min(region.bbox[0] for region in evidence_regions)
-    y1 = min(region.bbox[1] for region in evidence_regions)
-    x2 = max(region.bbox[2] for region in evidence_regions)
-    y2 = max(region.bbox[3] for region in evidence_regions)
+    expanded_evidence_bboxes = [
+        expanded_text_block_crop_bounds(image_shape, region)
+        for region in evidence_regions
+    ]
+    x1 = min(region_bbox[0] for region_bbox in expanded_evidence_bboxes)
+    y1 = min(region_bbox[1] for region_bbox in expanded_evidence_bboxes)
+    x2 = max(region_bbox[2] for region_bbox in expanded_evidence_bboxes)
+    y2 = max(region_bbox[3] for region_bbox in expanded_evidence_bboxes)
     evidence_bbox = clamp_bbox_to_image((x1, y1, x2, y2), image_shape)
     container_bbox = clamp_bbox_to_image(container_bbox, image_shape)
 
     container_area = max(bbox_area(container_bbox), 1.0)
     evidence_area = bbox_area(evidence_bbox)
     overlap_container, overlap_evidence = overlap_over_area(container_bbox, evidence_bbox)
+    has_comic_refinement = any(
+        region.detector == "comic_text_detector" or region.line_polygons
+        for region in evidence_regions
+    )
+    max_evidence_ratio = 1.60 if has_comic_refinement else 1.10
     if (
         evidence_area >= max(120.0, container_area * 0.18)
-        and evidence_area <= (container_area * 1.10)
+        and evidence_area <= (container_area * max_evidence_ratio)
         and overlap_evidence >= 0.65
         and overlap_container >= 0.15
     ):
@@ -283,7 +293,7 @@ def build_outside_text_blocks(
 
         evidence_regions = _combine_text_regions(attached_comics, image_shape) if attached_comics else [pp_region]
         ocr_bbox = _choose_outside_ocr_bbox(pp_region.bbox, evidence_regions, image_shape)
-        source_direction = (
+        source_direction = pp_region.source_direction or (
             "vertical"
             if (pp_region.bbox[3] - pp_region.bbox[1]) >= ((pp_region.bbox[2] - pp_region.bbox[0]) * 1.15)
             else "horizontal"
@@ -343,10 +353,15 @@ def build_outside_text_blocks(
             filtered_fallback_candidates.append(candidate)
 
     for comic_region in sort_manga_reading_order(filtered_fallback_candidates, order="ltr"):
-        source_direction = (
+        source_direction = comic_region.source_direction or (
             "vertical"
             if (comic_region.bbox[3] - comic_region.bbox[1]) >= ((comic_region.bbox[2] - comic_region.bbox[0]) * 1.15)
             else "horizontal"
+        )
+        fallback_ocr_bbox = _choose_outside_ocr_bbox(
+            comic_region.bbox,
+            [comic_region],
+            image_shape,
         )
         blocks.append(
             {
@@ -354,7 +369,7 @@ def build_outside_text_blocks(
                 "container_bbox": comic_region.bbox,
                 "text_region": comic_region,
                 "text_regions": [comic_region],
-                "ocr_bbox": comic_region.bbox,
+                "ocr_bbox": fallback_ocr_bbox,
                 "render_bbox": comic_region.bbox,
                 "inpaint_bbox": comic_region.bbox,
                 "reading_order": comic_region.reading_order,

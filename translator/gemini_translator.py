@@ -92,7 +92,7 @@ class GeminiTranslator(BaseTranslator):
         self.model_name = (
             model_name
             or os.environ.get("GEMINI_MODEL")
-            or "gemma-4-31b-it"
+            or "gemini-2.5-flash"
         )
 
         self.temperature = temperature

@@ -17,6 +17,7 @@ from .selection import (
     bbox_iou,
     center_in_bbox,
 )
+from .text_block_geometry import expanded_text_block_crop_bounds
 
 
 def legacy_detection_to_bubble_region(result: Sequence[object]) -> BubbleRegion:
@@ -75,6 +76,24 @@ def union_text_regions_bbox(
     x2 = max(region.bbox[2] for region in text_regions) + padding
     y2 = max(region.bbox[3] for region in text_regions) + padding
 
+    return clamp_bbox_to_image((x1, y1, x2, y2), image_shape)
+
+
+def union_expanded_text_block_crop_bounds(
+    text_regions: Sequence[TextRegion],
+    image_shape: Sequence[int],
+) -> tuple[int, int, int, int] | None:
+    if not text_regions:
+        return None
+
+    expanded_bboxes = [
+        expanded_text_block_crop_bounds(image_shape, region)
+        for region in text_regions
+    ]
+    x1 = min(region_bbox[0] for region_bbox in expanded_bboxes)
+    y1 = min(region_bbox[1] for region_bbox in expanded_bboxes)
+    x2 = max(region_bbox[2] for region_bbox in expanded_bboxes)
+    y2 = max(region_bbox[3] for region_bbox in expanded_bboxes)
     return clamp_bbox_to_image((x1, y1, x2, y2), image_shape)
 
 
@@ -347,13 +366,14 @@ def bubble_region_to_crop_data(
         full_mask = normalize_binary_mask(bubble_region.mask, image.shape)
         mask_crop = crop_bbox(full_mask, bubble_bbox)
 
-    ocr_bbox = union_text_regions_bbox(
+    ocr_bbox = union_expanded_text_block_crop_bounds(
         matched_text_regions or [],
         image.shape,
-        padding=padding,
     )
     if ocr_bbox is None:
         ocr_bbox = bubble_bbox
+    elif padding:
+        ocr_bbox = expand_bbox(ocr_bbox, image.shape, padding)
 
     ocr_crop = crop_bbox(image, ocr_bbox)
 
@@ -373,7 +393,9 @@ def text_region_to_crop_data(
     padding: int = 6,
 ):
     np_module = _require_numpy()
-    region_bbox = expand_bbox(text_region.bbox, image.shape, padding)
+    region_bbox = expanded_text_block_crop_bounds(image.shape, text_region)
+    if padding:
+        region_bbox = expand_bbox(region_bbox, image.shape, padding)
     region_crop = crop_bbox(image, region_bbox)
 
     if text_region.mask is None:
@@ -438,6 +460,28 @@ def map_mask_from_roi_to_page(mask, roi_bbox, image_shape):
     return full_mask
 
 
+def _map_line_polygons_from_roi_to_page(line_polygons, roi_bbox):
+    if not line_polygons:
+        return line_polygons
+
+    roi_x1, roi_y1, _, _ = roi_bbox
+    mapped_polygons = []
+    for polygon in line_polygons:
+        mapped_polygon = []
+        try:
+            for point in polygon:
+                if len(point) < 2:
+                    continue
+                mapped_polygon.append(
+                    [int(point[0]) + int(roi_x1), int(point[1]) + int(roi_y1)]
+                )
+        except TypeError:
+            continue
+        if mapped_polygon:
+            mapped_polygons.append(mapped_polygon)
+    return mapped_polygons or None
+
+
 def map_text_region_from_roi_to_page(
     text_region: TextRegion,
     roi_bbox,
@@ -447,6 +491,10 @@ def map_text_region_from_roi_to_page(
         text_region,
         bbox=map_bbox_from_roi_to_page(text_region.bbox, roi_bbox),
         mask=map_mask_from_roi_to_page(text_region.mask, roi_bbox, image_shape),
+        line_polygons=_map_line_polygons_from_roi_to_page(
+            text_region.line_polygons,
+            roi_bbox,
+        ),
     )
 
 
@@ -670,6 +718,10 @@ def merge_duplicate_text_regions(
             bubble_id=existing.bubble_id if existing.bubble_id is not None else text_region.bubble_id,
             reading_order=min(reading_orders) if reading_orders else None,
             detector=preferred.detector if preferred.detector is not None else existing.detector or text_region.detector,
+            line_polygons=preferred.line_polygons or existing.line_polygons or text_region.line_polygons,
+            source_direction=preferred.source_direction or existing.source_direction or text_region.source_direction,
+            rotation_deg=preferred.rotation_deg if preferred.rotation_deg is not None else existing.rotation_deg if existing.rotation_deg is not None else text_region.rotation_deg,
+            detected_font_size_px=preferred.detected_font_size_px if preferred.detected_font_size_px is not None else existing.detected_font_size_px if existing.detected_font_size_px is not None else text_region.detected_font_size_px,
         )
 
     return merged
@@ -694,5 +746,6 @@ __all__ = [
     "process_bubble_with_mask",
     "rectangular_contour",
     "text_region_to_crop_data",
+    "union_expanded_text_block_crop_bounds",
     "union_text_regions_bbox",
 ]

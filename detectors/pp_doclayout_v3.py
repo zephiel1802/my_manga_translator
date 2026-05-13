@@ -16,18 +16,6 @@ from .runtime_utils import clamp_bbox_to_image, expand_bbox
 
 
 MODEL_ID = "PaddlePaddle/PP-DocLayoutV3_safetensors"
-TEXT_LIKE_LABEL_PARTS = (
-    "text",
-    "title",
-    "paragraph",
-    "caption",
-    "footnote",
-    "number",
-    "header",
-    "footer",
-    "formula",
-    "table",
-)
 FIGURE_LIKE_LABEL_PARTS = (
     "figure",
     "image",
@@ -121,6 +109,16 @@ def _full_page_layout_region(image_shape, *, label: str = "full_page", reading_o
         label=label,
         label_id=None,
         reading_order=reading_order,
+    )
+
+
+def is_pp_text_block_label(label: str) -> bool:
+    normalized = (label or "").strip().lower()
+    return (
+        normalized == "content"
+        or "text" in normalized
+        or "title" in normalized
+        or "caption" in normalized
     )
 
 
@@ -344,6 +342,7 @@ def layout_regions_to_text_regions(
     *,
     confidence_threshold: float = 0.20,
     padding: int = 4,
+    allow_unknown: bool = False,
 ) -> list[TextRegion]:
     text_regions: list[TextRegion] = []
     page_height = int(image_shape[0])
@@ -362,19 +361,26 @@ def layout_regions_to_text_regions(
         area_ratio = area / page_area
         label = (region.label or "").strip().lower()
 
-        is_text_like = any(part in label for part in TEXT_LIKE_LABEL_PARTS)
+        is_text_like = is_pp_text_block_label(label)
         is_figure_like = any(part in label for part in FIGURE_LIKE_LABEL_PARTS)
-        is_unknown = not label or label in {"unknown", "other", "layout", "full_page"}
+        is_unknown = not label or label in {"unknown", "other", "layout"}
 
         if is_figure_like and area_ratio >= 0.18:
             continue
         if label in {"background", "full_page"} and area_ratio >= 0.50:
             continue
-        if is_unknown and area_ratio >= 0.35:
+        if label == "full_page":
             continue
-        if not is_text_like and not is_unknown and area_ratio >= 0.75:
+        if not is_text_like:
+            if not allow_unknown or not is_unknown:
+                continue
+        if is_unknown and area_ratio >= 0.18:
+            continue
+        if area_ratio >= 0.35:
             continue
 
+        width = max(1, bbox[2] - bbox[0])
+        height = max(1, bbox[3] - bbox[1])
         text_regions.append(
             TextRegion(
                 bbox=bbox,
@@ -386,6 +392,12 @@ def layout_regions_to_text_regions(
                 bubble_id=None,
                 reading_order=region.reading_order,
                 detector="pp_doclayout_v3",
+                source_direction=(
+                    "vertical"
+                    if height >= (width * 1.15)
+                    else "horizontal"
+                ),
+                detected_font_size_px=float(min(width, height)),
             )
         )
 
@@ -556,6 +568,7 @@ __all__ = [
     "detect_layout_regions",
     "ensure_pp_doclayout_v3_available",
     "get_pp_doclayout_v3_detector",
+    "is_pp_text_block_label",
     "layout_regions_to_text_regions",
     "normalize_layout_detections",
 ]

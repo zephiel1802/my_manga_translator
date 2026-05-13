@@ -28,18 +28,32 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8088
 DEFAULT_TIMEOUT = 120
 DEFAULT_CTX = 4096
-DEFAULT_TASK_PREFIX = "OCR"
+DEFAULT_TASK_PREFIX = "ocr"
 DEFAULT_MAX_NEW_TOKENS = 512
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_REPETITION_PENALTY = 1.05
 DEFAULT_REPEAT_LAST_N = -1
 DEFAULT_MAX_RETRIES = 3
-DEFAULT_MIN_SHORT_SIDE = 432
-DEFAULT_MAX_LONG_SIDE = 1024
-DEFAULT_IMAGE_PAD = 6
+DEFAULT_MIN_SHORT_SIDE = 512
+DEFAULT_MAX_LONG_SIDE = 2048
+DEFAULT_IMAGE_PAD = 12
 OCR_REPEAT_MAX_UNIT_CHARS = 12
 OCR_REPEAT_MIN_REPETITIONS = 4
 OCR_REPEAT_MIN_TOTAL_CHARS = 12
+OCR_LIST_MARKER_CHARS = r"\-\–\—\*\•\・"
+OCR_CIRCLED_NUMBER_CHARS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
+LINE_LIST_MARKER_RE = re.compile(
+    rf"^\s*(?:(?:\((?:\d{{1,3}})\)|(?:\d{{1,3}}[.):]|[{OCR_CIRCLED_NUMBER_CHARS}]))|[{OCR_LIST_MARKER_CHARS}])\s*"
+)
+LINE_NUMBERED_MARKER_RE = re.compile(
+    rf"^\s*(?:\((?:\d{{1,3}})\)|(?:\d{{1,3}}[.):]|[{OCR_CIRCLED_NUMBER_CHARS}]))\s*"
+)
+INLINE_NUMBERED_MARKER_RE = re.compile(
+    rf"(?:(?<=^)|(?<=\s))(?:\((?:\d{{1,3}})\)|(?:\d{{1,3}}[.):]|[{OCR_CIRCLED_NUMBER_CHARS}]))(?=\s*\S)"
+)
+INLINE_BULLET_MARKER_RE = re.compile(
+    rf"(?:(?<=^)|(?<=\s))(?:[{OCR_LIST_MARKER_CHARS}])(?=\s*\S)"
+)
 
 
 class PaddleOCRVLError(RuntimeError):
@@ -98,8 +112,59 @@ def normalize_ocr_language(language: str | None) -> str | None:
 def build_paddleocr_vl_prompt(source_language: str | None = None) -> str:
     language = normalize_ocr_language(source_language)
     if language:
-        return f"{DEFAULT_TASK_PREFIX} {language}:"
-    return f"{DEFAULT_TASK_PREFIX}:"
+        return f"{DEFAULT_TASK_PREFIX}"
+    return f"{DEFAULT_TASK_PREFIX}"
+
+
+def _looks_like_multiline_list(lines: list[str]) -> bool:
+    non_empty_lines = [line for line in lines if line.strip()]
+    if len(non_empty_lines) < 2:
+        return False
+
+    marker_count = sum(1 for line in non_empty_lines if LINE_LIST_MARKER_RE.match(line))
+    return marker_count >= 2 and marker_count >= max(2, len(non_empty_lines) - 1)
+
+
+def _strip_line_marker(line: str) -> str:
+    return LINE_LIST_MARKER_RE.sub("", line, count=1).strip()
+
+
+def _strip_inline_numbered_markers(text: str) -> str:
+    cleaned = str(text or "")
+
+    numbered_markers = list(INLINE_NUMBERED_MARKER_RE.finditer(cleaned))
+    if len(numbered_markers) >= 2:
+        cleaned = INLINE_NUMBERED_MARKER_RE.sub("", cleaned)
+
+    bullet_markers = list(INLINE_BULLET_MARKER_RE.finditer(cleaned))
+    if len(bullet_markers) >= 2:
+        cleaned = INLINE_BULLET_MARKER_RE.sub("", cleaned)
+
+    return cleaned
+
+
+def _join_ocr_lines(lines: list[str]) -> str:
+    joined = " ".join(line.strip() for line in lines if line and line.strip())
+    joined = re.sub(r"\s+", " ", joined)
+    joined = re.sub(r"\s+([,.;:!?])", r"\1", joined)
+    return joined.strip()
+
+
+def strip_ocr_list_markers(text: str) -> str:
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return ""
+
+    lines = cleaned.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    if _looks_like_multiline_list(lines):
+        stripped_lines = [_strip_line_marker(line) for line in lines]
+        return _join_ocr_lines(stripped_lines)
+
+    inline_cleaned = _strip_inline_numbered_markers(cleaned)
+    if inline_cleaned != cleaned:
+        return _join_ocr_lines(inline_cleaned.replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+
+    return cleaned
 
 
 def clean_paddleocr_vl_output(text: str) -> str:
@@ -142,6 +207,8 @@ def clean_paddleocr_vl_output(text: str) -> str:
         if cleaned.lower().startswith(prefix.lower()):
             cleaned = cleaned[len(prefix) :].strip()
             break
+
+    cleaned = strip_ocr_list_markers(cleaned)
 
     lines = [line.strip() for line in cleaned.replace("\r\n", "\n").replace("\r", "\n").split("\n")]
     lines = [" ".join(line.split()) for line in lines if line.strip()]
@@ -839,5 +906,6 @@ __all__ = [
     "is_degenerate_ocr_output",
     "normalize_ocr_language",
     "repeated_ocr_suffix_start",
+    "strip_ocr_list_markers",
     "trim_repeated_ocr_output",
 ]
