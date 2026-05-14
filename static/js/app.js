@@ -157,6 +157,17 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+    const translationBatchSizeInput = document.getElementById('translation_batch_size');
+    if (translationBatchSizeInput) {
+        const savedBatchSize = localStorage.getItem('translation_batch_size');
+        if (savedBatchSize) {
+            translationBatchSizeInput.value = savedBatchSize;
+        }
+        translationBatchSizeInput.addEventListener('input', () => {
+            localStorage.setItem('translation_batch_size', translationBatchSizeInput.value);
+        });
+    }
+
     // Load saved checkbox states from localStorage
     const contextMemoryCheckbox = document.getElementById('context_memory');
     if (contextMemoryCheckbox) {

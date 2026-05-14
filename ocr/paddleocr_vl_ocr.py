@@ -28,28 +28,29 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8088
 DEFAULT_TIMEOUT = 120
 DEFAULT_CTX = 4096
-DEFAULT_TASK_PREFIX = "ocr"
+DEFAULT_TASK_PREFIX = "OCR:"
 DEFAULT_MAX_NEW_TOKENS = 512
 DEFAULT_TEMPERATURE = 0.0
-DEFAULT_REPETITION_PENALTY = 1.05
+DEFAULT_REPETITION_PENALTY = 1.2
 DEFAULT_REPEAT_LAST_N = -1
 DEFAULT_MAX_RETRIES = 3
-DEFAULT_MIN_SHORT_SIDE = 512
-DEFAULT_MAX_LONG_SIDE = 2048
+DEFAULT_MIN_SHORT_SIDE = 10
+DEFAULT_MAX_LONG_SIDE = 1000
 DEFAULT_IMAGE_PAD = 12
+DEFAULT_MAX_UPSCALE_FACTOR = 4.0
 OCR_REPEAT_MAX_UNIT_CHARS = 12
 OCR_REPEAT_MIN_REPETITIONS = 4
 OCR_REPEAT_MIN_TOTAL_CHARS = 12
 OCR_LIST_MARKER_CHARS = r"\-\–\—\*\•\・"
 OCR_CIRCLED_NUMBER_CHARS = "①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳"
 LINE_LIST_MARKER_RE = re.compile(
-    rf"^\s*(?:(?:\((?:\d{{1,3}})\)|(?:\d{{1,3}}[.):]|[{OCR_CIRCLED_NUMBER_CHARS}]))|[{OCR_LIST_MARKER_CHARS}])\s*"
+    rf"^\s*(?:(?:\((?:\d{{1,2}})\)|(?:\d{{1,2}}(?:[.):]|\s+)|[{OCR_CIRCLED_NUMBER_CHARS}]))|[{OCR_LIST_MARKER_CHARS}])\s*"
 )
 LINE_NUMBERED_MARKER_RE = re.compile(
-    rf"^\s*(?:\((?:\d{{1,3}})\)|(?:\d{{1,3}}[.):]|[{OCR_CIRCLED_NUMBER_CHARS}]))\s*"
+    rf"^\s*(?:\((?:\d{{1,2}})\)|(?:\d{{1,2}}(?:[.):]|\s+)|[{OCR_CIRCLED_NUMBER_CHARS}]))\s*"
 )
 INLINE_NUMBERED_MARKER_RE = re.compile(
-    rf"(?:(?<=^)|(?<=\s))(?:\((?:\d{{1,3}})\)|(?:\d{{1,3}}[.):]|[{OCR_CIRCLED_NUMBER_CHARS}]))(?=\s*\S)"
+    rf"(?:(?<=^)|(?<=\s))(?:\((?:\d{{1,2}})\)|(?:\d{{1,2}}[.):]|[{OCR_CIRCLED_NUMBER_CHARS}]))(?=\s*\S)"
 )
 INLINE_BULLET_MARKER_RE = re.compile(
     rf"(?:(?<=^)|(?<=\s))(?:[{OCR_LIST_MARKER_CHARS}])(?=\s*\S)"
@@ -133,11 +134,11 @@ def _strip_inline_numbered_markers(text: str) -> str:
     cleaned = str(text or "")
 
     numbered_markers = list(INLINE_NUMBERED_MARKER_RE.finditer(cleaned))
-    if len(numbered_markers) >= 2:
+    if len(numbered_markers) >= 1:
         cleaned = INLINE_NUMBERED_MARKER_RE.sub("", cleaned)
 
     bullet_markers = list(INLINE_BULLET_MARKER_RE.finditer(cleaned))
-    if len(bullet_markers) >= 2:
+    if len(bullet_markers) >= 1:
         cleaned = INLINE_BULLET_MARKER_RE.sub("", cleaned)
 
     return cleaned
@@ -177,7 +178,7 @@ def clean_paddleocr_vl_output(text: str) -> str:
 
     if cleaned.startswith("```") and cleaned.endswith("```"):
         lines = cleaned.splitlines()
-        if len(lines) >= 3:
+        if len(lines) >= 2:
             cleaned = "\n".join(lines[1:-1]).strip()
 
     try:
@@ -454,6 +455,7 @@ class PaddleOCRVLOCR:
         min_short_side: int | None = None,
         max_long_side: int | None = None,
         image_pad: int | None = None,
+        max_upscale_factor: float | None = None,
         prompt: str | None = None,
         source_language: str | None = None,
         repetition_penalty: float = DEFAULT_REPETITION_PENALTY,
@@ -493,20 +495,33 @@ class PaddleOCRVLOCR:
             or build_paddleocr_vl_prompt(self.source_language)
         )
 
-        self.min_short_side = int(
+        raw_min_short_side = (
             min_short_side
-            or os.environ.get("PADDLEOCR_VL_MIN_SHORT_SIDE", DEFAULT_MIN_SHORT_SIDE)
+            if min_short_side is not None
+            else os.environ.get("PADDLEOCR_VL_MIN_SHORT_SIDE", DEFAULT_MIN_SHORT_SIDE)
         )
+        self.min_short_side = int(raw_min_short_side)
 
-        self.max_long_side = int(
+        raw_max_long_side = (
             max_long_side
-            or os.environ.get("PADDLEOCR_VL_MAX_LONG_SIDE", DEFAULT_MAX_LONG_SIDE)
+            if max_long_side is not None
+            else os.environ.get("PADDLEOCR_VL_MAX_LONG_SIDE", DEFAULT_MAX_LONG_SIDE)
         )
+        self.max_long_side = int(raw_max_long_side)
 
-        self.image_pad = int(
+        raw_image_pad = (
             image_pad
-            or os.environ.get("PADDLEOCR_VL_PAD", DEFAULT_IMAGE_PAD)
+            if image_pad is not None
+            else os.environ.get("PADDLEOCR_VL_PAD", DEFAULT_IMAGE_PAD)
         )
+        self.image_pad = int(raw_image_pad)
+
+        raw_max_upscale_factor = (
+            max_upscale_factor
+            if max_upscale_factor is not None
+            else os.environ.get("PADDLEOCR_VL_MAX_UPSCALE_FACTOR", DEFAULT_MAX_UPSCALE_FACTOR)
+        )
+        self.max_upscale_factor = float(raw_max_upscale_factor)
     
     def _preprocess_ocr_image(self, pil_image: Image.Image) -> Image.Image:
         image = pil_image.convert("RGB")
@@ -529,13 +544,14 @@ class PaddleOCRVLOCR:
 
         scale = 1.0
 
-        if short_side < self.min_short_side:
-            scale = max(scale, self.min_short_side / short_side)
+        if self.min_short_side > 0 and short_side < self.min_short_side:
+            desired_scale = self.min_short_side / short_side
+            scale = max(scale, min(desired_scale, self.max_upscale_factor))
 
-        if long_side * scale > self.max_long_side:
-            scale = self.max_long_side / long_side
+        if self.max_long_side > 0 and long_side * scale > self.max_long_side:
+            scale = min(scale, self.max_long_side / long_side)
 
-        if abs(scale - 1.0) > 0.01:
+        if abs(scale - 1.0) > 0.01 and (scale < 1.0 or scale > 1.01):
             new_width = max(1, int(round(width * scale)))
             new_height = max(1, int(round(height * scale)))
             image = image.resize((new_width, new_height), Image.Resampling.LANCZOS)
@@ -572,12 +588,20 @@ class PaddleOCRVLOCR:
             return image.convert("RGB")
 
         if np is not None and isinstance(image, np.ndarray):
+            # Numpy crops are assumed to come from the app's OpenCV pipeline,
+            # so 3-channel arrays are treated as BGR and 4-channel arrays as BGRA.
             array = image
+            if array.dtype != np.uint8:
+                array = np.clip(array, 0, 255).astype(np.uint8)
             if array.ndim == 2:
                 return Image.fromarray(array).convert("RGB")
-            if array.ndim == 3 and array.shape[2] >= 3:
-                return Image.fromarray(array[..., :3][:, :, ::-1]).convert("RGB")
-            return Image.fromarray(array).convert("RGB")
+            if array.ndim == 3 and array.shape[2] == 3:
+                return Image.fromarray(array[:, :, ::-1]).convert("RGB")
+            if array.ndim == 3 and array.shape[2] == 4:
+                return Image.fromarray(array[:, :, [2, 1, 0, 3]]).convert("RGB")
+            raise PaddleOCRVLError(
+                f"PaddleOCR-VL received unsupported numpy crop shape: {array.shape}"
+            )
 
         raise PaddleOCRVLError(
             "PaddleOCR-VL expects a PIL.Image or numpy array crop."
@@ -884,6 +908,16 @@ class PaddleOCRVLOCR:
             results.append(text)
 
         return results
+
+    def reset_session(self) -> None:
+        """
+        Called between pages to allow OCR backends to clear transient state.
+
+        For llama.cpp server mode this is intentionally a no-op unless a future
+        endpoint or opt-in restart behavior is configured.
+        """
+        if os.environ.get("PADDLEOCR_VL_RESTART_SERVER_PER_PAGE", "0") == "1":
+            self.close()
 
     def close(self) -> None:
         if self._server_process is not None and self._server_started_here:

@@ -210,6 +210,7 @@ No markdown.
         target: str = "en",
         custom_prompt: str = None,
         context_memory: "ContextMemory" = None,
+        allow_internal_fallback: bool = True,
     ) -> Dict[str, List[str]]:
         """
         Translate texts from multiple pages in a single API call.
@@ -279,6 +280,7 @@ Rules:
 - Do not use markdown.
 """.strip()
 
+        last_exception = None
         for attempt in range(MAX_RETRIES):
             try:
                 response_text = self._generate_text(
@@ -302,6 +304,7 @@ Rules:
                 return translated_pages
 
             except Exception as e:
+                last_exception = e
                 error_str = str(e)
                 print(f"Gemini pages batch attempt {attempt + 1}/{MAX_RETRIES} failed: {e}")
 
@@ -313,9 +316,12 @@ Rules:
                     delay = RETRY_DELAY_BASE * (2 ** attempt)
                     print(f"Retrying in {delay}s...")
                     time.sleep(delay)
-                else:
-                    print("Gemini pages batch failed. Falling back to page-by-page translation.")
+        if not allow_internal_fallback:
+            if last_exception is not None:
+                raise last_exception
+            raise ValueError("Gemini pages batch failed without a recoverable response.")
 
+        print("Gemini pages batch failed. Falling back to page-by-page translation.")
         result = {}
 
         for page_name, texts in pages_texts.items():

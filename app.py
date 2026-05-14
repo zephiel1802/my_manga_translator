@@ -36,7 +36,6 @@ from inpainting import (
 from translator.translator import MangaTranslator
 from translator.context_memory import ContextMemory
 from ocr.chrome_lens_ocr import ChromeLensOCR
-from PIL import Image
 import numpy as np
 import base64
 import cv2
@@ -44,6 +43,16 @@ from render_item_utils import (
     build_outside_text_blocks,
     consolidate_render_items,
     dedupe_ocr_items_by_text_and_geometry,
+)
+from batch_ocr_flow import (
+    build_translation_inputs_from_pages,
+    run_page_scoped_ocr,
+)
+from ocr_crop_utils import ocr_crop_to_pil_rgb
+from translator.batch_orchestrator import (
+    build_page_chunks,
+    parse_translation_batch_size,
+    translate_pages_chunked_with_recovery,
 )
 from text_rendering import choose_render_style_for_item, render_manga_text_block
 
@@ -610,7 +619,7 @@ def process_single_image(image, manga_translator, mocr, selected_translator, sel
     texts_to_translate = []
 
     for render_item in render_items:
-        im = Image.fromarray(render_item["ocr_crop"])
+        im = ocr_crop_to_pil_rgb(render_item["ocr_crop"])
         text = mocr(im)
         texts_to_translate.append(text)
 
@@ -720,9 +729,17 @@ def get_font_path(font_name: str) -> str:
         return f"fonts/{font_name}.ttf"
 
 
-def process_images_with_batch(images_data, manga_translator, mocr, selected_font, translator_type, batch_size=10, use_context_memory=True):
+def process_images_with_batch(
+    images_data,
+    manga_translator,
+    mocr,
+    selected_font,
+    translator_type,
+    translation_batch_size=None,
+    use_context_memory=True,
+):
     """
-    Process multiple images with multi-page batching for Copilot or Gemini.
+    Process multiple images with multi-page batching.
     Collects all texts first, batch translates, then applies translations.
     
     Args:
@@ -730,8 +747,8 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         manga_translator: MangaTranslator instance with translator
         mocr: OCR engine
         selected_font: Font to use
-        translator_type: 'copilot' or 'gemini'
-        batch_size: Number of pages per API call
+        translator_type: Translator backend key
+        translation_batch_size: User-configured number of pages per translation request
         use_context_memory: Whether to include context from all pages for better translation
         
     Returns:
@@ -757,16 +774,12 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
     
     start_time = time.time()
     
-    # Use batch OCR when the selected backend supports it.
-    use_batch_ocr = hasattr(mocr, 'process_batch')
-    
     # Phase 1a: Detect page regions and collect all OCR items
     print("\n[Phase 1] Detecting page regions...")
     emit_progress('detection', 0, total_images, 'Starting page analysis...')
 
     all_pages_data = {}
-    all_ocr_images = []
-    ocr_mapping = []
+    page_order = []
     total_bubbles = 0
     total_text_regions = 0
     total_outside_text_regions = 0
@@ -797,6 +810,7 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
             'render_items': render_items,
             'texts': []
         }
+        page_order.append(name)
 
         print(
             " - "
@@ -813,11 +827,10 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
             f"final_ocr_items={page_stats.get('final_render_items', len(render_items))}"
         )
 
-        for item_idx, render_item in enumerate(render_items):
-            all_ocr_images.append(Image.fromarray(render_item["ocr_crop"]))
-            ocr_mapping.append((name, item_idx))
-    
-    total_text_items = len(all_ocr_images)
+    total_text_items = sum(
+        len(page_data["render_items"])
+        for page_data in all_pages_data.values()
+    )
     detection_time = time.time() - start_time
     print(
         f"Detected {total_bubbles} bubbles, {total_text_regions} text regions, "
@@ -832,47 +845,73 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
     print(f"Page analysis completed in {detection_time:.1f}s ({total_text_items} text items)")
 
     
-    # Phase 1b: Batch OCR all text items at once
-    if all_ocr_images:
+    # Phase 1b: OCR page-by-page to keep multimodal state isolated per page
+    if total_text_items:
         ocr_start = time.time()
-        print(f"Preparing OCR for {len(all_ocr_images)} text items...", end=" ", flush=True)
-        emit_progress('ocr', 0, 1, f'OCR processing {len(all_ocr_images)} text items...')
-        print(f"\n[Phase 2] OCR processing {len(all_ocr_images)} text items...", end=" ", flush=True)
-        
-        if use_batch_ocr:
-            # Use batch OCR on providers that implement process_batch.
-            all_texts = mocr.process_batch(all_ocr_images)
-        else:
-            # Sequential OCR for simple callable providers.
-            all_texts = [mocr(img) for img in all_ocr_images]
-        
-        # Map texts back to pages
-        for (page_name, item_idx), text in zip(ocr_mapping, all_texts):
-            all_pages_data[page_name]['texts'].append(text)
+        pages_with_ocr = sum(
+            1 for page_name in page_order if all_pages_data[page_name]["render_items"]
+        )
+        emit_progress(
+            'ocr',
+            0,
+            max(pages_with_ocr, 1),
+            f'OCR processing {total_text_items} text items across {pages_with_ocr} pages...'
+        )
+        print(f"\n[Phase 2] OCR processing {total_text_items} text items across {pages_with_ocr} pages...")
 
-        for page_name, page_data in all_pages_data.items():
-            deduped_items, deduped_texts = dedupe_ocr_items_by_text_and_geometry(
-                page_data['render_items'],
-                page_data['texts'],
-                logger=log if VERBOSE_LOG else None,
+        def _page_ocr_progress(page_index, total_pages, page_name, item_count):
+            emit_progress(
+                'ocr',
+                page_index,
+                max(total_pages, 1),
+                f'OCR page {page_index}/{total_pages}: {page_name} ({item_count} text items)',
             )
-            page_data['render_items'] = deduped_items
-            page_data['texts'] = deduped_texts
-        total_text_items = sum(len(page_data['render_items']) for page_data in all_pages_data.values())
+
+        total_text_items = run_page_scoped_ocr(
+            all_pages_data,
+            page_order,
+            mocr,
+            logger=print,
+            page_callback=_page_ocr_progress,
+        )
+        ocr_texts_in_order, _ocr_mapping = build_translation_inputs_from_pages(
+            all_pages_data,
+            page_order,
+        )
         
         ocr_time = time.time() - ocr_start
-        print(f"({ocr_time:.1f}s)")
-        print(f"OCR completed for {len(all_ocr_images)} text items")
-        print(f"OCR finished in {ocr_time:.1f}s ({len(all_ocr_images)/max(ocr_time, 1e-6):.1f} text items/sec)")
-        emit_progress('ocr', 1, 1, f'OCR complete ({len(all_ocr_images)} text items)')
+        print(f"OCR completed for {len(ocr_texts_in_order)} text items")
+        print(f"OCR finished in {ocr_time:.1f}s ({len(ocr_texts_in_order)/max(ocr_time, 1e-6):.1f} text items/sec)")
+        emit_progress(
+            'ocr',
+            max(pages_with_ocr, 1),
+            max(pages_with_ocr, 1),
+            f'OCR complete ({len(ocr_texts_in_order)} text items)'
+        )
     
     # Phase 3: Batch translate all pages together
 
-    emit_progress('translation', 0, 1, 'Translating text...')
-    pages_texts = {name: data['texts'] for name, data in all_pages_data.items() if data['texts']}
+    pages_texts = {
+        name: all_pages_data[name]['texts']
+        for name in page_order
+        if all_pages_data[name]['texts']
+    }
     all_translations = {}
     
     if pages_texts:
+        parsed_translation_batch_size = parse_translation_batch_size(translation_batch_size)
+        translation_chunks = build_page_chunks(
+            list(pages_texts.keys()),
+            parsed_translation_batch_size,
+            default_size=5,
+        )
+        emit_progress(
+            'translation',
+            0,
+            max(len(translation_chunks), 1),
+            f'Translating {sum(len(lines) for lines in pages_texts.values())} text items across {len(pages_texts)} pages...',
+        )
+
         # Get the translator based on type
         if translator_type == "copilot" and hasattr(manga_translator, '_local_llm_translator') and manga_translator._local_llm_translator:
             translator = manga_translator._local_llm_translator
@@ -888,51 +927,123 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
             translator_name = "Unknown"
         
         if translator:
-            print(f"{translator_name} batch translating {len(pages_texts)} pages in chunks of {batch_size}...")
+            if parsed_translation_batch_size is not None:
+                print(
+                    f"{translator_name} batch translating {len(pages_texts)} pages "
+                    f"in chunks of {parsed_translation_batch_size}..."
+                )
+            else:
+                print(
+                    f"{translator_name} batch translating {len(pages_texts)} pages "
+                    "using balanced chunks around 5 pages..."
+                )
             
             # Initialize context memory if enabled
             context_memory = None
             if use_context_memory:
                 context_memory = ContextMemory()
                 print(f"  Context Memory enabled - tracking terms and story context")
-            
-            # Process in batches
-            page_names = list(pages_texts.keys())
-            
-            for i in range(0, len(page_names), batch_size):
-                batch_names = page_names[i:i + batch_size]
-                batch_texts = {name: pages_texts[name] for name in batch_names}
-                
-                print(f"  Translating batch {i//batch_size + 1}: pages {i+1}-{min(i+batch_size, len(page_names))}")
-                
-                try:
-                    translated = translator.translate_pages_batch(
-                        batch_texts,
-                        source=manga_translator.source,
-                        target=manga_translator.target,
-                        context_memory=context_memory
+
+            if translator_type in {"gemini", "deepseek"}:
+                chunk_state = {"completed": 0}
+
+                def _translation_chunk_callback(chunk_index, total_chunks, chunk_names, stage):
+                    if stage == "start":
+                        emit_progress(
+                            'translation',
+                            max(chunk_state["completed"], 0),
+                            max(total_chunks, 1),
+                            f'Translating chunk {chunk_index}/{total_chunks}: {", ".join(chunk_names)}',
+                        )
+                    elif stage == "done":
+                        chunk_state["completed"] = chunk_index
+                        emit_progress(
+                            'translation',
+                            chunk_index,
+                            max(total_chunks, 1),
+                            f'Translated chunk {chunk_index}/{total_chunks}',
+                        )
+
+                all_translations = translate_pages_chunked_with_recovery(
+                    translator,
+                    pages_texts,
+                    source=manga_translator.source,
+                    target=manga_translator.target,
+                    custom_prompt=None,
+                    context_memory=context_memory,
+                    batch_size=translation_batch_size,
+                    logger=print,
+                    chunk_callback=_translation_chunk_callback,
+                )
+            else:
+                for chunk_index, batch_names in enumerate(translation_chunks, start=1):
+                    batch_texts = {name: pages_texts[name] for name in batch_names}
+                    emit_progress(
+                        'translation',
+                        chunk_index - 1,
+                        max(len(translation_chunks), 1),
+                        f'Translating chunk {chunk_index}/{len(translation_chunks)}: {", ".join(batch_names)}',
                     )
-                    all_translations.update(translated)
-                    
-                    # Update context memory with this batch's translations
-                    if context_memory:
-                        context_memory.update_from_translation(batch_texts, translated)
-                        stats = context_memory.get_stats()
-                        print(f"    Context updated: {stats['tracked_words']} terms tracked, {stats['recent_pages']} pages in memory")
-                        
-                except Exception as e:
-                    print(f"  Batch failed: {e}, falling back to individual translation")
-                    for name, texts in batch_texts.items():
-                        try:
-                            all_translations[name] = translator.translate_batch(
-                                texts, manga_translator.source, manga_translator.target
-                            )
-                        except:
-                            all_translations[name] = texts  # Return original on error
+                    print(
+                        f"[Translation] Chunk {chunk_index}/{len(translation_chunks)}: "
+                        + ", ".join(batch_names)
+                    )
+
+                    try:
+                        translated = translator.translate_pages_batch(
+                            batch_texts,
+                            source=manga_translator.source,
+                            target=manga_translator.target,
+                            context_memory=context_memory,
+                        )
+                        all_translations.update(translated)
+
+                        if context_memory:
+                            context_memory.update_from_translation(batch_texts, translated)
+                            if hasattr(context_memory, "get_stats"):
+                                stats = context_memory.get_stats()
+                                print(
+                                    f"[Translation] Context updated: "
+                                    f"{stats['tracked_words']} terms tracked, "
+                                    f"{stats['recent_pages']} pages in memory"
+                                )
+                        print(
+                            f"[Translation] Chunk {chunk_index} OK: "
+                            f"{len(batch_names)}/{len(batch_names)} pages"
+                        )
+                    except Exception as e:
+                        print(f"[Translation] Chunk {chunk_index} failed: {e}")
+                        for name, texts in batch_texts.items():
+                            try:
+                                all_translations[name] = translator.translate_batch(
+                                    texts,
+                                    manga_translator.source,
+                                    manga_translator.target,
+                                )
+                            except Exception:
+                                all_translations[name] = texts
+
+                    emit_progress(
+                        'translation',
+                        chunk_index,
+                        max(len(translation_chunks), 1),
+                        f'Translated chunk {chunk_index}/{len(translation_chunks)}',
+                    )
+
+            for name in page_order:
+                all_pages_data[name]["translated_texts"] = all_translations.get(
+                    name,
+                    list(all_pages_data[name]["texts"]),
+                )
     
     translation_time = time.time() - start_time - detection_time
     print(f"Translation completed in {translation_time:.1f}s")
-    emit_progress('translation', 1, 1, 'Translation complete')
+    emit_progress(
+        'translation',
+        max(len(translation_chunks) if pages_texts else 1, 1),
+        max(len(translation_chunks) if pages_texts else 1, 1),
+        'Translation complete',
+    )
     
     # Phase 4: Inpaint page text and render translations
     emit_progress('rendering', 0, total_images, 'Inpainting pages and rendering translations...')
@@ -950,7 +1061,7 @@ def process_images_with_batch(images_data, manga_translator, mocr, selected_font
         
         image = data['image']
         render_items = data['render_items']
-        translated_texts = all_translations.get(name, data['texts'])  # Fallback to original
+        translated_texts = data.get('translated_texts', data['texts'])  # Fallback to original
 
         final_image = finalize_page_translation(
             image,
@@ -1008,6 +1119,9 @@ def upload_file():
 
     # Get split long images setting (checkbox - "on" if checked, None if not)
     split_long_images = request.form.get("split_long_images") == "on"
+
+    # Get translation batch size (pages per translation request)
+    translation_batch_size = request.form.get("translation_batch_size", "5")
 
     # Get font selection
     selected_font_raw = request.form["selected_font"]
@@ -1237,10 +1351,11 @@ def upload_file():
                     f"(style: {style or 'default'}, thinking: {deepseek_thinking})"
                 )
         
-        # Process with multi-page batching (10 pages per API call)
+        # Process with multi-page batching
         processed_results = process_images_with_batch(
             all_images, manga_translator, mocr, selected_font, 
-            translator_type=selected_translator, batch_size=10,
+            translator_type=selected_translator,
+            translation_batch_size=translation_batch_size,
             use_context_memory=use_context_memory,
         )
         

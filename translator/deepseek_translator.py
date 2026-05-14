@@ -549,6 +549,8 @@ Bắt buộc:
         target: str = "en",
         custom_prompt: str = None,
         context_memory: "ContextMemory" = None,
+        allow_internal_fallback: bool = True,
+        repair_shape: bool = True,
     ) -> Dict[str, List[str]]:
         """
         Translate texts from multiple pages in a single API call.
@@ -570,6 +572,7 @@ Bắt buộc:
             context_memory,
         )
 
+        last_exception = None
         for attempt in range(MAX_RETRIES):
             try:
                 result_text = self._post(
@@ -588,6 +591,7 @@ Bắt buộc:
                 return translated_pages
 
             except Exception as e:
+                last_exception = e
                 error_str = str(e)
                 print(
                     f"DeepSeek pages batch attempt "
@@ -604,6 +608,11 @@ Bắt buộc:
 
                 if attempt < MAX_RETRIES - 1:
                     self._retry_delay(attempt)
+
+        if not allow_internal_fallback:
+            if last_exception is not None:
+                raise last_exception
+            raise ValueError("DeepSeek pages batch failed without a recoverable response.")
 
         print(
             "DeepSeek pages batch failed after retries. "
@@ -625,11 +634,12 @@ Bắt buộc:
                 custom_prompt=custom_prompt,
             )
 
-            page_translations = self._repair_list_length(
-                page_translations,
-                texts,
-                label=f"DeepSeek page fallback {page_name}",
-            )
+            if repair_shape:
+                page_translations = self._repair_list_length(
+                    page_translations,
+                    texts,
+                    label=f"DeepSeek page fallback {page_name}",
+                )
 
             result[page_name] = page_translations
 
