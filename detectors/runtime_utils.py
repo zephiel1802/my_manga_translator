@@ -350,7 +350,7 @@ def bubble_region_to_crop_data(
     bubble_region: BubbleRegion,
     matched_text_regions: Sequence[TextRegion] | None = None,
     *,
-    padding: int = 12,
+    padding: int = 24,
 ):
     np_module = _require_numpy()
     bubble_bbox = clamp_bbox_to_image(bubble_region.bbox, image.shape)
@@ -390,7 +390,7 @@ def text_region_to_crop_data(
     image: np.ndarray,
     text_region: TextRegion,
     *,
-    padding: int = 6,
+    padding: int = 16,
 ):
     np_module = _require_numpy()
     region_bbox = expanded_text_block_crop_bounds(image.shape, text_region)

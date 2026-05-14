@@ -1,0 +1,381 @@
+"""Helpers for building OCR preparation items from cached detection results."""
+
+from __future__ import annotations
+
+from collections.abc import Callable, Iterable, Sequence
+from typing import Any
+
+TEXT_LIKE_LAYOUT_LABEL_PARTS = ("text", "title", "caption", "content")
+
+
+def build_ocr_items_from_detection(
+    detection_data: dict[str, Any],
+    image_shape: Sequence[int],
+    *,
+    logger: Callable[[str], None] | None = None,
+) -> list[dict[str, Any]]:
+    """Build conservative OCR items from cached detection JSON.
+
+    This intentionally keeps the logic simple for the milestone:
+    - one bubble OCR item per detected bubble
+    - unmatched text regions become outside-text OCR items
+    - text-like layout regions act as conservative fallbacks when they do not
+      strongly overlap existing OCR candidates
+
+    Future milestones can reuse more of the old render-item heuristics here
+    without changing the file-backed OCR cache contract.
+    """
+
+    bubbles = detection_data.get("bubbles", [])
+    text_regions = detection_data.get("text_regions", [])
+    layout_regions = detection_data.get("layout_regions", [])
+
+    bubble_items: list[dict[str, Any]] = []
+    outside_items: list[dict[str, Any]] = []
+    existing_non_bubble_boxes: list[tuple[int, int, int, int]] = []
+
+    for bubble_index, bubble in enumerate(bubbles):
+        bubble_id = _coerce_int(bubble.get("id"), bubble_index)
+        bubble_bbox = clamp_bbox_to_image(bubble.get("bbox"), image_shape)
+        if bubble_bbox is None:
+            continue
+
+        matched_text_regions = [
+            text_region
+            for text_region in text_regions
+            if text_region.get("bubble_id") == bubble_id
+        ]
+
+        refined_bbox = union_bboxes(
+            (
+                clamp_bbox_to_image(text_region.get("bbox"), image_shape)
+                for text_region in matched_text_regions
+            ),
+            image_shape,
+        )
+        ocr_bbox = expand_bbox(refined_bbox, image_shape, 24) if refined_bbox is not None else bubble_bbox
+        reading_order = _min_reading_order(matched_text_regions)
+        source_direction = _first_non_empty(
+            [text_region.get("source_direction") for text_region in matched_text_regions]
+        ) or infer_source_direction(ocr_bbox)
+
+        detector_sources = unique_strings(
+            [
+                bubble.get("detector"),
+                *[text_region.get("detector") for text_region in matched_text_regions],
+            ]
+        )
+
+        bubble_items.append(
+            {
+                "id": bubble_index,
+                "kind": "bubble",
+                "bbox": bbox_to_list(bubble_bbox),
+                "ocr_bbox": bbox_to_list(ocr_bbox),
+                "crop_path": None,
+                "bubble_id": bubble_id,
+                "reading_order": reading_order,
+                "detector_sources": detector_sources,
+                "source_direction": source_direction,
+                "text": "",
+                "status": "prepared",
+            }
+        )
+
+    ordered_unmatched_text_regions = sorted(
+        [
+            text_region
+            for text_region in text_regions
+            if text_region.get("bubble_id") is None
+        ],
+        key=lambda entry: sort_key_for_region(entry.get("bbox"), entry.get("reading_order")),
+    )
+
+    for region_index, text_region in enumerate(ordered_unmatched_text_regions):
+        region_bbox = clamp_bbox_to_image(text_region.get("bbox"), image_shape)
+        if region_bbox is None:
+            continue
+
+        ocr_bbox = expand_bbox(region_bbox, image_shape, 16)
+        existing_non_bubble_boxes.append(ocr_bbox)
+        outside_items.append(
+            {
+                "id": region_index,
+                "kind": "outside_text",
+                "bbox": bbox_to_list(region_bbox),
+                "ocr_bbox": bbox_to_list(ocr_bbox),
+                "crop_path": None,
+                "bubble_id": None,
+                "reading_order": _coerce_optional_int(text_region.get("reading_order")),
+                "detector_sources": unique_strings([text_region.get("detector")]),
+                "source_direction": text_region.get("source_direction") or infer_source_direction(ocr_bbox),
+                "text": "",
+                "status": "prepared",
+            }
+        )
+
+    fallback_layout_items: list[dict[str, Any]] = []
+    for layout_region in sorted(
+        layout_regions,
+        key=lambda entry: sort_key_for_region(entry.get("bbox"), entry.get("reading_order")),
+    ):
+        label = str(layout_region.get("label") or "").strip().lower()
+        if not is_text_like_layout_label(label):
+            continue
+
+        layout_bbox = clamp_bbox_to_image(layout_region.get("bbox"), image_shape)
+        if layout_bbox is None:
+            continue
+
+        if is_huge_bbox(layout_bbox, image_shape, max_region_ratio=0.35):
+            continue
+
+        if overlap_ratio_against_many(layout_bbox, (bubble.get("bbox") for bubble in bubbles), image_shape) >= 0.35:
+            continue
+
+        if overlap_ratio_against_many(layout_bbox, existing_non_bubble_boxes, image_shape) >= 0.60:
+            continue
+
+        ocr_bbox = expand_bbox(layout_bbox, image_shape, 16)
+        existing_non_bubble_boxes.append(ocr_bbox)
+        fallback_layout_items.append(
+            {
+                "id": len(fallback_layout_items),
+                "kind": "layout_text",
+                "bbox": bbox_to_list(layout_bbox),
+                "ocr_bbox": bbox_to_list(ocr_bbox),
+                "crop_path": None,
+                "bubble_id": None,
+                "reading_order": _coerce_optional_int(layout_region.get("reading_order")),
+                "detector_sources": unique_strings([layout_region.get("detector"), "pp_doclayout_v3"]),
+                "source_direction": infer_source_direction(ocr_bbox),
+                "text": "",
+                "status": "prepared",
+            }
+        )
+
+    all_items = bubble_items + outside_items + fallback_layout_items
+    all_items = sorted(
+        all_items,
+        key=lambda entry: sort_key_for_region(entry.get("ocr_bbox") or entry.get("bbox"), entry.get("reading_order")),
+    )
+
+    for item_id, item in enumerate(all_items):
+        item["id"] = item_id
+
+    if logger is not None:
+        logger(
+            "Prepared OCR items from detection cache: "
+            f"{len(bubble_items)} bubble, "
+            f"{len(outside_items)} outside_text, "
+            f"{len(fallback_layout_items)} layout_text"
+        )
+
+    return all_items
+
+
+def clamp_bbox_to_image(
+    bbox: Any,
+    image_shape: Sequence[int],
+) -> tuple[int, int, int, int] | None:
+    if not isinstance(bbox, (list, tuple)) or len(bbox) < 4:
+        return None
+
+    height = int(image_shape[0])
+    width = int(image_shape[1])
+    x1, y1, x2, y2 = [int(value) for value in bbox[:4]]
+
+    x1 = max(0, min(x1, width))
+    y1 = max(0, min(y1, height))
+    x2 = max(0, min(x2, width))
+    y2 = max(0, min(y2, height))
+
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return (x1, y1, x2, y2)
+
+
+def expand_bbox(
+    bbox: tuple[int, int, int, int] | None,
+    image_shape: Sequence[int],
+    padding: int,
+) -> tuple[int, int, int, int] | None:
+    if bbox is None:
+        return None
+
+    expanded = (
+        int(bbox[0]) - int(padding),
+        int(bbox[1]) - int(padding),
+        int(bbox[2]) + int(padding),
+        int(bbox[3]) + int(padding),
+    )
+    return clamp_bbox_to_image(expanded, image_shape)
+
+
+def union_bboxes(
+    boxes: Iterable[tuple[int, int, int, int] | None],
+    image_shape: Sequence[int],
+) -> tuple[int, int, int, int] | None:
+    normalized_boxes = [box for box in boxes if box is not None]
+    if not normalized_boxes:
+        return None
+
+    merged_bbox = (
+        min(box[0] for box in normalized_boxes),
+        min(box[1] for box in normalized_boxes),
+        max(box[2] for box in normalized_boxes),
+        max(box[3] for box in normalized_boxes),
+    )
+    return clamp_bbox_to_image(merged_bbox, image_shape)
+
+
+def bbox_area(bbox: tuple[int, int, int, int] | None) -> int:
+    if bbox is None:
+        return 0
+    return max(0, int(bbox[2]) - int(bbox[0])) * max(0, int(bbox[3]) - int(bbox[1]))
+
+
+def bbox_intersection_area(
+    a: tuple[int, int, int, int] | None,
+    b: tuple[int, int, int, int] | None,
+) -> int:
+    if a is None or b is None:
+        return 0
+
+    x1 = max(int(a[0]), int(b[0]))
+    y1 = max(int(a[1]), int(b[1]))
+    x2 = min(int(a[2]), int(b[2]))
+    y2 = min(int(a[3]), int(b[3]))
+    if x2 <= x1 or y2 <= y1:
+        return 0
+    return (x2 - x1) * (y2 - y1)
+
+
+def overlap_ratio_against_many(
+    bbox: tuple[int, int, int, int],
+    candidates: Iterable[Any],
+    image_shape: Sequence[int],
+) -> float:
+    target_area = max(bbox_area(bbox), 1)
+    best_ratio = 0.0
+
+    for candidate in candidates:
+        candidate_bbox = clamp_bbox_to_image(candidate, image_shape)
+        if candidate_bbox is None:
+            continue
+        best_ratio = max(
+            best_ratio,
+            bbox_intersection_area(bbox, candidate_bbox) / target_area,
+        )
+
+    return best_ratio
+
+
+def is_text_like_layout_label(label: str) -> bool:
+    normalized = str(label or "").strip().lower()
+    return any(part in normalized for part in TEXT_LIKE_LAYOUT_LABEL_PARTS)
+
+
+def is_huge_bbox(
+    bbox: tuple[int, int, int, int],
+    image_shape: Sequence[int],
+    *,
+    max_region_ratio: float,
+) -> bool:
+    page_area = max(1, int(image_shape[0]) * int(image_shape[1]))
+    return bbox_area(bbox) > int(page_area * float(max_region_ratio))
+
+
+def infer_source_direction(bbox: tuple[int, int, int, int]) -> str:
+    width = max(1, int(bbox[2]) - int(bbox[0]))
+    height = max(1, int(bbox[3]) - int(bbox[1]))
+    return "vertical" if height >= (width * 1.15) else "horizontal"
+
+
+def crop_image_to_bbox(image: Any, bbox: Sequence[int | float]) -> Any:
+    x1, y1, x2, y2 = [int(value) for value in bbox[:4]]
+    return image[y1:y2, x1:x2]
+
+
+def bbox_to_list(bbox: Sequence[int | float] | None) -> list[int] | None:
+    if bbox is None:
+        return None
+    return [int(value) for value in bbox[:4]]
+
+
+def sort_key_for_region(
+    bbox: Any,
+    reading_order: Any,
+) -> tuple[int, int, int]:
+    normalized_bbox = bbox if isinstance(bbox, (list, tuple)) and len(bbox) >= 4 else (0, 0, 0, 0)
+    order = _coerce_optional_int(reading_order)
+    return (
+        order if order is not None else 10**9,
+        int(normalized_bbox[1]),
+        int(normalized_bbox[0]),
+    )
+
+
+def unique_strings(values: Iterable[Any]) -> list[str]:
+    seen: set[str] = set()
+    ordered: list[str] = []
+
+    for value in values:
+        if value is None:
+            continue
+        normalized = str(value).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+
+    return ordered
+
+
+def _coerce_int(value: Any, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _coerce_optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except Exception:
+        return None
+
+
+def _min_reading_order(regions: Iterable[dict[str, Any]]) -> int | None:
+    orders = [_coerce_optional_int(region.get("reading_order")) for region in regions]
+    valid_orders = [order for order in orders if order is not None]
+    return min(valid_orders) if valid_orders else None
+
+
+def _first_non_empty(values: Iterable[Any]) -> str | None:
+    for value in values:
+        if value is None:
+            continue
+        normalized = str(value).strip()
+        if normalized:
+            return normalized
+    return None
+
+
+__all__ = [
+    "bbox_area",
+    "bbox_intersection_area",
+    "bbox_to_list",
+    "build_ocr_items_from_detection",
+    "clamp_bbox_to_image",
+    "crop_image_to_bbox",
+    "expand_bbox",
+    "infer_source_direction",
+    "is_text_like_layout_label",
+    "overlap_ratio_against_many",
+    "sort_key_for_region",
+    "union_bboxes",
+    "unique_strings",
+]

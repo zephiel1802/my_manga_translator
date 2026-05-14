@@ -21,3 +21,4 @@ chrome-lens-py>=3.0.0
 google-genai
 transformers==4.57.3
 requests>=2.31.0
+PyQt6==6.7.1

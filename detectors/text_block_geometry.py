@@ -94,16 +94,16 @@ def expanded_text_block_crop_bounds(
         if text_region.detected_font_size_px is not None
         else min(width, height)
     )
-    base_pad = max(font_size * 0.08, 2.0)
+    base_pad = max(font_size * 0.20, 6.0)
     direction = text_region.source_direction or (
         "vertical" if height >= (width * 1.15) else "horizontal"
     )
     if direction == "vertical":
-        pad_x = max(font_size * 0.18, base_pad)
-        pad_y = max(font_size * 0.12, base_pad)
+        pad_x = max(font_size * 0.35, base_pad)
+        pad_y = max(font_size * 0.25, base_pad)
     else:
-        pad_x = max(font_size * 0.12, base_pad)
-        pad_y = max(font_size * 0.18, base_pad)
+        pad_x = max(font_size * 0.25, base_pad)
+        pad_y = max(font_size * 0.35, base_pad)
 
     return _clamp_bbox(
         (
