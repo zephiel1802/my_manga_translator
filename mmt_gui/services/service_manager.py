@@ -44,7 +44,6 @@ from .models import (
 from .ocr_service import OCRService
 from .process_service import ProcessService
 from .render_service import RenderService
-from .resource_scheduler import ResourceScheduler
 from .translation_service import TranslationService
 
 
@@ -79,9 +78,10 @@ class ServiceManager(QObject):
         super().__init__(parent)
         self.workspace_root = Path(workspace_root)
         self.startup_options = dict(startup_options or {})
-        self.scheduler = ResourceScheduler()
+        self.scheduler = None
         self._services: dict[str, _ServiceEntry] = {}
         self._pending_commands: dict[str, _PendingCommand] = {}
+        self._service_active_commands: dict[str, str] = {}
         self._service_statuses: dict[str, ServiceStatusSnapshot] = {}
         self._lock = threading.RLock()
         self._shutting_down = False
@@ -125,8 +125,15 @@ class ServiceManager(QObject):
         with self._lock:
             if self._shutting_down:
                 raise ServiceDispatchError("Services are shutting down.")
+            self._reserve_service_slot_locked(service_name=service_name, command_id_value=command.command_id)
             self._pending_commands[command.command_id] = pending
-        self._submit_to_service(command)
+        try:
+            self._submit_to_service(command)
+        except Exception:
+            with self._lock:
+                self._pending_commands.pop(command.command_id, None)
+                self._release_service_slot_locked(service_name)
+            raise
         return handle
 
     def run_task_sync(self, task: Any, parent_command: ServiceCommand) -> ServiceCommandResult:
@@ -138,8 +145,15 @@ class ServiceManager(QObject):
         with self._lock:
             if self._shutting_down:
                 raise ServiceDispatchError("Services are shutting down.")
+            self._reserve_service_slot_locked(service_name=service_name, command_id_value=command.command_id)
             self._pending_commands[command.command_id] = pending
-        self._submit_to_service(command)
+        try:
+            self._submit_to_service(command)
+        except Exception:
+            with self._lock:
+                self._pending_commands.pop(command.command_id, None)
+                self._release_service_slot_locked(service_name)
+            raise
 
         cancel_forwarded = False
         while not sync_event.wait(timeout=0.10):
@@ -150,6 +164,8 @@ class ServiceManager(QObject):
         result = pending.sync_result
         if result is None:
             raise RuntimeError("Resident service completed without a result payload.")
+        if result.state == "busy":
+            raise ServiceDispatchError(result.error or f"{service_name} worker is busy.")
         if result.state == "failed":
             raise RuntimeError(result.error or f"{service_name} command failed.")
         if result.state == "canceled":
@@ -184,7 +200,7 @@ class ServiceManager(QObject):
 
     def has_active_commands(self) -> bool:
         with self._lock:
-            return bool(self._pending_commands)
+            return bool(self._service_active_commands)
 
     def service_statuses(self) -> dict[str, ServiceStatusSnapshot]:
         with self._lock:
@@ -194,6 +210,7 @@ class ServiceManager(QObject):
         startup_options = {
             "preload_detection": bool(self.startup_options.get("preload_detection", True)),
             "preload_inpaint": bool(self.startup_options.get("preload_inpaint", True)),
+            "preload_render": bool(self.startup_options.get("preload_render", True)),
             "device": str(self.startup_options.get("inpaint_device", "") or ""),
         }
 
@@ -264,9 +281,13 @@ class ServiceManager(QObject):
 
     def _ensure_service_ready(self, service_name: str) -> None:
         normalized = str(service_name or "").strip().lower()
-        status = self._service_statuses.get(normalized)
+        with self._lock:
+            status = self._service_statuses.get(normalized)
+            active_command_id = self._service_active_commands.get(normalized)
         if status is None:
             raise ServiceDispatchError(f"{normalized.title()} service is still starting. Please wait a moment.")
+        if active_command_id:
+            raise ServiceDispatchError(f"{normalized.title()} worker is busy.")
         if status.state == "error":
             raise ServiceDispatchError(
                 f"{normalized.title()} service is in an error state: {status.message or 'Unknown service error.'}"
@@ -416,7 +437,9 @@ class ServiceManager(QObject):
             pending.handle.signals.failed.emit(payload.error or "Resident service command failed.")
         if pending.sync_event is not None:
             pending.sync_event.set()
-        self._emit_diagnostic("error", f"[{payload.service_name}] {payload.action} failed: {payload.error}")
+        level = "warning" if payload.state == "busy" else "error"
+        suffix = "busy" if payload.state == "busy" else "failed"
+        self._emit_diagnostic(level, f"[{payload.service_name}] {payload.action} {suffix}: {payload.error}")
 
     def _on_service_command_canceled(self, payload: object) -> None:
         if not isinstance(payload, ServiceCommandResult):
@@ -446,7 +469,10 @@ class ServiceManager(QObject):
 
     def _pop_pending(self, command_id_value: str) -> _PendingCommand | None:
         with self._lock:
-            return self._pending_commands.pop(str(command_id_value or "").strip(), None)
+            pending = self._pending_commands.pop(str(command_id_value or "").strip(), None)
+            if pending is not None:
+                self._release_service_slot_locked(pending.command.service_name)
+            return pending
 
     def _pending_for_payload(self, payload: dict[str, Any]) -> _PendingCommand | None:
         command_id_value = str(payload.get("command_id", "") or "").strip()
@@ -464,6 +490,17 @@ class ServiceManager(QObject):
         except Exception:
             pass
         self.diagnostic_message.emit(line, normalized_level)
+
+    def _reserve_service_slot_locked(self, *, service_name: str, command_id_value: str) -> None:
+        normalized = str(service_name or "").strip().lower()
+        active_command_id = self._service_active_commands.get(normalized)
+        if active_command_id:
+            raise ServiceDispatchError(f"{normalized.title()} worker is busy.")
+        self._service_active_commands[normalized] = str(command_id_value or "").strip()
+
+    def _release_service_slot_locked(self, service_name: str) -> None:
+        normalized = str(service_name or "").strip().lower()
+        self._service_active_commands.pop(normalized, None)
 
     def _format_log_payload(self, payload: dict[str, Any]) -> str:
         service_name = str(payload.get("service_name", "") or "").strip() or "service"

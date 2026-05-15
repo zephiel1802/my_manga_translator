@@ -12,6 +12,7 @@ from .page_list import PageListWidget
 from .page_filmstrip import PageFilmstripWidget
 from .preview_toolbar import PreviewToolbar
 from .settings_card import SettingsCard, style_button
+from .startup_overlay import StartupOverlay
 from .stage_status import StageStatusDot, StageStatusLine, StatusLabel
 from .text_item_editor import TextItemEditorWidget
 from .workflow_tabs import STAGE_ORDER, WorkflowTabs
@@ -28,6 +29,7 @@ __all__ = [
     "PageListWidget",
     "PreviewToolbar",
     "SettingsCard",
+    "StartupOverlay",
     "StageStatusDot",
     "StageStatusLine",
     "StatusLabel",

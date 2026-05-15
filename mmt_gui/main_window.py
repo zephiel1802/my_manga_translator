@@ -104,7 +104,7 @@ from .window_layout import (
     WINDOW_LAYOUT_VERSION,
     clamp_window_geometry,
 )
-from .widgets import AppHeader, ImagePreviewWidget, LeftToolBar, LogPanel, PageFilmstripWidget, WorkflowTabs
+from .widgets import AppHeader, ImagePreviewWidget, LeftToolBar, LogPanel, PageFilmstripWidget, StartupOverlay, WorkflowTabs
 from .workers import (
     DetectionTask,
     DetectionWorkerResult,
@@ -132,19 +132,7 @@ from .workers import (
     TranslationInitializationWorkerResult,
     TranslationTask,
     TranslationWorkerResult,
-    create_detection_worker,
-    create_export_worker,
-    create_inpaint_mask_worker,
-    create_inpaint_worker,
-    create_lama_model_worker,
     create_llama_server_worker,
-    create_ocr_inference_worker,
-    create_ocr_preparation_worker,
-    create_process_worker,
-    create_render_preparation_worker,
-    create_render_worker,
-    create_translation_initialization_worker,
-    create_translation_worker,
 )
 
 IMAGE_FILTER = "Images (*.jpg *.jpeg *.png *.webp)"
@@ -161,8 +149,6 @@ PREVIEW_DETECTION = "Detection Overlay"
 PREVIEW_MASK = "Mask Overlay"
 PREVIEW_INPAINT = "Inpaint Result"
 PREVIEW_RENDER = "Render Result"
-
-HEAVY_MODEL_STAGE_KEYS = {"detection", "inpaint"}
 
 PREVIEW_MODES_BY_STAGE: dict[str, list[str]] = {
     "process": [PREVIEW_SOURCE, PREVIEW_DETECTION, PREVIEW_MASK, PREVIEW_INPAINT, PREVIEW_RENDER],
@@ -234,6 +220,7 @@ class MainWindow(QMainWindow):
         self._process_cancel_requested = False
         self._service_statuses: dict[str, ServiceStatusSnapshot] = {}
         self.service_manager: ServiceManager | None = None
+        self.startup_overlay: StartupOverlay | None = None
 
         self.thread_pool = QThreadPool.globalInstance()
         self._active_workers: list[TaskWorker | ServiceCommandHandle] = []
@@ -267,8 +254,9 @@ class MainWindow(QMainWindow):
         self.service_manager = ServiceManager(
             workspace_root=self.workspace_root,
             startup_options={
-                "preload_detection": self.app_settings.bool_value("services/preload_detection_on_startup", False),
-                "preload_inpaint": self.app_settings.bool_value("services/preload_inpaint_on_startup", False),
+                "preload_detection": self.app_settings.bool_value("services/preload_detection_on_startup", True),
+                "preload_inpaint": self.app_settings.bool_value("services/preload_inpaint_on_startup", True),
+                "preload_render": self.app_settings.bool_value("services/preload_render_on_startup", True),
                 "inpaint_device": self.app_settings.string_value("services/inpaint_startup_device", ""),
             },
             parent=self,
@@ -279,6 +267,7 @@ class MainWindow(QMainWindow):
         )
         self.header.set_service_status_text("Services: starting...")
         self.service_manager.start_services()
+        self._show_startup_overlay()
 
         self.header.theme_changed.connect(self._on_theme_changed)
         self.left_toolbar.auto_preview_changed.connect(self._on_auto_preview_changed)
@@ -405,6 +394,8 @@ class MainWindow(QMainWindow):
         root_layout.addWidget(self.workflow_tabs)
         root_layout.addWidget(self._workspace_splitter, 1)
         self.setCentralWidget(root_widget)
+        self.startup_overlay = StartupOverlay(root_widget)
+        self.startup_overlay.hide()
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -1788,7 +1779,13 @@ class MainWindow(QMainWindow):
         self._service_statuses[payload.service_name] = payload
         if hasattr(self, "process_panel"):
             self.process_panel.set_service_status(payload.service_name, payload.state, payload.message)
+        if self.startup_overlay is not None:
+            self.startup_overlay.set_service_status(payload.service_name, payload.state, payload.message)
+            self.startup_overlay.set_overall_message(
+                f"{payload.service_name.title()}: {payload.message or payload.state.title()}"
+            )
         self._refresh_service_status_summary()
+        self._refresh_startup_overlay_visibility()
         if payload.state == "error":
             self.statusBar().showMessage(f"{payload.service_name.title()} service error: {payload.message}")
 
@@ -1799,7 +1796,7 @@ class MainWindow(QMainWindow):
         states = [snapshot.state for snapshot in self._service_statuses.values()]
         ready_count = len([state for state in states if state in {"ready", "idle"}])
         loading_count = len([state for state in states if state in {"starting", "loading"}])
-        running_count = len([state for state in states if state in {"queued", "running"}])
+        running_count = len([state for state in states if state in {"busy", "running"}])
         error_count = len([state for state in states if state == "error"])
         summary_parts = [f"Services: {ready_count}/{len(states)} ready"]
         if loading_count:
@@ -1810,32 +1807,34 @@ class MainWindow(QMainWindow):
             summary_parts.append(f"{error_count} error")
         self.header.set_service_status_text(" | ".join(summary_parts))
 
-    def _heavy_model_busy_stage(self, *, excluding_stage: str | None = None) -> str | None:
-        excluded = str(excluding_stage or "").strip().lower()
-        for stage_name in self._busy_stages:
-            normalized = str(stage_name or "").strip().lower()
-            if normalized in HEAVY_MODEL_STAGE_KEYS and normalized != excluded:
-                return normalized
-        for worker in self._active_workers:
-            normalized = str(getattr(getattr(worker, "task", None), "stage", "") or "").strip().lower()
-            if normalized in HEAVY_MODEL_STAGE_KEYS and normalized != excluded:
-                return normalized
-        return None
+    def _show_startup_overlay(self) -> None:
+        if self.startup_overlay is None:
+            return
+        self._position_startup_overlay()
+        self.startup_overlay.show()
+        self.startup_overlay.raise_()
+        self.startup_overlay.set_overall_message("Preloading resident workers and models...")
 
-    def _ensure_heavy_model_stage_available(self, *, requested_stage: str, action_label: str) -> bool:
-        busy_stage = self._heavy_model_busy_stage(excluding_stage=requested_stage)
-        if not busy_stage:
-            return True
+    def _position_startup_overlay(self) -> None:
+        if self.startup_overlay is None or self.centralWidget() is None:
+            return
+        self.startup_overlay.setGeometry(self.centralWidget().rect())
 
-        busy_label = "Detection" if busy_stage == "detection" else "Inpaint"
-        message = (
-            f"Another model task is running ({busy_label}). "
-            f"Please wait for it to finish before starting {action_label}."
-        )
-        self.statusBar().showMessage(message)
-        self.log(message, level="warning")
-        self.show_error("Another model task is running", message)
-        return False
+    def _refresh_startup_overlay_visibility(self) -> None:
+        if self.startup_overlay is None:
+            return
+        if not self._service_statuses:
+            self._show_startup_overlay()
+            return
+        unresolved_states = {
+            snapshot.state
+            for snapshot in self._service_statuses.values()
+            if snapshot.state in {"starting", "loading"}
+        }
+        if unresolved_states:
+            self._show_startup_overlay()
+            return
+        self.startup_overlay.hide()
 
     def process_current_page(self, force: bool = False) -> None:
         if not self._ensure_current_editor_changes_resolved():
@@ -2806,6 +2805,10 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             self.log(f"Resident service shutdown failure: {exc}", level="warning")
         super().closeEvent(event)
+
+    def resizeEvent(self, event) -> None:  # pragma: no cover - GUI geometry path.
+        super().resizeEvent(event)
+        self._position_startup_overlay()
 
     def current_page(self) -> str | None:
         if self.current_project is None:

@@ -1,4 +1,8 @@
-"""Simple resource-lane scheduler for resident stage services."""
+"""Legacy resource scheduler kept only for compatibility tests.
+
+The active resident-service path no longer serializes commands through
+global lanes. Services own their own long-lived threads and busy state.
+"""
 
 from __future__ import annotations
 

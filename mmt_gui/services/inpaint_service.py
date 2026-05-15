@@ -34,20 +34,13 @@ from .resource_scheduler import ResourceScheduler
 
 
 class InpaintService(BaseService):
-    def __init__(self, *, scheduler: ResourceScheduler, startup_options: dict | None = None) -> None:
+    def __init__(self, *, scheduler: ResourceScheduler | None = None, startup_options: dict | None = None) -> None:
         super().__init__("inpaint", scheduler=scheduler, startup_options=startup_options)
         self._manager = LamaInpainterManager()
 
-    def lane_for_command(self, command: ServiceCommand) -> str | None:
-        if command.action in {"prepare_mask_page", "prepare_mask_pages"}:
-            return "cpu_image_lane"
-        if command.action in {"preload_model", "reload_model", "unload_model", "inpaint_page", "inpaint_pages"}:
-            return "gpu_model_lane"
-        return None
-
     def on_initialize(self) -> None:
         if not bool(self.startup_options.get("preload_inpaint", True)):
-            self._emit_log("info", "Inpaint preload disabled; service is ready.")
+            self._emit_status("error", "Inpaint preload is disabled. Enable startup preload or reload the service.")
             return
         self._emit_status("loading", "Preloading LaMa Manga model...")
         device = str(self.startup_options.get("device", "") or "")
@@ -201,16 +194,18 @@ class InpaintService(BaseService):
 
         for index, image_relative_path in enumerate(task.image_relative_paths, start=1):
             self._check_canceled(command, message="Inpaint canceled before the next page.")
+            page_name = Path(image_relative_path).name
             bridge.event.emit(
                 {
                     "event": "batch_page_start" if total_pages > 1 else "page_start",
                     "image_relative_path": str(image_relative_path),
                     "page_index": index,
                     "page_total": total_pages,
-                    "message": f"[{index}/{total_pages}] Inpainting {Path(image_relative_path).name}",
+                    "message": f"[{index}/{total_pages}] Inpainting {page_name}",
                 }
             )
             try:
+                self._emit_log("info", f"before LaMa inference {page_name}")
                 image_path = run_inpaint_for_page(
                     task.project,
                     image_relative_path,
@@ -223,10 +218,11 @@ class InpaintService(BaseService):
                     progress_callback=bridge.event.emit,
                     manager=self._manager,
                 )
+                self._emit_log("info", f"after LaMa inference {page_name}")
                 metadata = load_inpaint_json(inpaint_json_path(task.project, image_relative_path))
                 summary = summarize_inpaint_json(metadata)
             except Exception as exc:
-                readable_error = f"{Path(image_relative_path).name}: {exc}"
+                readable_error = f"{page_name}: {exc}"
                 bridge.message.emit(f"Inpaint failed: {readable_error}")
                 page_results.append(
                     InpaintPageResult(

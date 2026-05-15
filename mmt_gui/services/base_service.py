@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, field
+import traceback
 from typing import Any
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
@@ -17,7 +17,6 @@ from .models import (
     ServiceStatusSnapshot,
     utc_timestamp,
 )
-from .resource_scheduler import ResourceScheduler
 
 
 class ServiceCanceledError(RuntimeError):
@@ -97,14 +96,13 @@ class BaseService(QObject):
         self,
         service_name: str,
         *,
-        scheduler: ResourceScheduler,
+        scheduler: Any | None = None,
         startup_options: dict[str, Any] | None = None,
     ) -> None:
         super().__init__()
         self.service_name = str(service_name or "").strip().lower()
         self.scheduler = scheduler
         self.startup_options = dict(startup_options or {})
-        self._queue: deque[ServiceCommand] = deque()
         self._active_command: ServiceCommand | None = None
         self._stopping = False
         self._ready = False
@@ -136,11 +134,16 @@ class BaseService(QObject):
             self._emit_log("error", f"Service startup failed: {exc}")
             self._emit_status("error", str(exc))
             return
+        if self._status.state == "error":
+            self._ready = False
+            return
+        if self._status.state == "stopped":
+            self._ready = False
+            return
 
         self._ready = True
         self._emit_status("ready", "Ready")
         self._emit_status("idle", "Idle")
-        self._process_next_if_idle()
 
     def on_initialize(self) -> None:
         """Optional subclass hook for startup preload."""
@@ -165,7 +168,7 @@ class BaseService(QObject):
             state=str(state or "").strip().lower() or "idle",
             message=str(message or ""),
             active_command_id=self._active_command.command_id if self._active_command is not None else "",
-            queued_count=len(self._queue),
+            queued_count=0,
             updated_at=utc_timestamp(),
             details=dict(details),
         )
@@ -282,88 +285,62 @@ class BaseService(QObject):
         )
         self.command_canceled.emit(payload)
 
+    def _emit_command_busy(self, command: ServiceCommand, *, message: str) -> None:
+        payload = ServiceCommandResult(
+            command_id=command.command_id,
+            service_name=self.service_name,
+            action=command.action,
+            stage=command.stage,
+            state="busy",
+            error=str(message or ""),
+        )
+        self.command_failed.emit(payload)
+
     def _check_canceled(self, command: ServiceCommand, *, message: str | None = None) -> None:
         if command.cancel_token.is_cancel_requested():
             raise ServiceCanceledError(message or "Command canceled.")
 
-    def _process_next_if_idle(self) -> None:
-        if not self._ready:
-            return
-        if self._stopping or self._active_command is not None or not self._queue:
-            self._emit_status(
-                "stopping" if self._stopping else ("running" if self._active_command is not None else "idle"),
-                "Stopping..." if self._stopping else ("Running..." if self._active_command is not None else "Idle"),
-            )
-            return
-
-        command = self._queue.popleft()
+    def _run_command(self, command: ServiceCommand) -> None:
         self._active_command = command
-        self._emit_status("running", f"Running {command.action}...", action=command.action)
+        self._emit_status("busy", f"Running {command.action}...", action=command.action)
         self._emit_command_started(command, message=f"{command.action} started.")
-
-        lane_name = self.lane_for_command(command)
-        acquired_lane = False
         try:
             self._check_canceled(command)
-            if lane_name:
-                acquired_lane = self.scheduler.acquire(
-                    lane_name,
-                    cancel_token=command.cancel_token,
-                    logger=lambda message, active_command=command, lane=lane_name: self._emit_log(
-                        "info",
-                        message,
-                        command=active_command,
-                        lane=lane,
-                    ),
-                )
-                if not acquired_lane:
-                    raise ServiceCanceledError("Command canceled before resource lane was acquired.")
             bridge = self._build_bridge(command)
             result = self.execute_command(command, bridge)
         except ServiceCanceledError as exc:
-            self._emit_log("warning", str(exc), command=command, lane=lane_name or "")
+            self._emit_log("warning", str(exc), command=command)
             self._emit_command_canceled(command, message=str(exc))
         except Exception as exc:
-            self._emit_log("error", str(exc), command=command, lane=lane_name or "")
+            self._emit_log("error", f"{exc}\n{traceback.format_exc()}", command=command)
             self._emit_command_failed(command, message=str(exc))
         else:
             self._emit_command_finished(command, result=result)
         finally:
-            if acquired_lane and lane_name:
-                self.scheduler.release(
-                    lane_name,
-                    logger=lambda message, active_command=command, lane=lane_name: self._emit_log(
-                        "info",
-                        message,
-                        command=active_command,
-                        lane=lane,
-                    ),
-                )
             self._active_command = None
             if self._stopping:
-                self._emit_status("stopping", "Stopping...")
+                try:
+                    self.on_shutdown()
+                finally:
+                    self._ready = False
+                    self._emit_status("stopped", "Stopped")
             else:
                 self._emit_status("idle", "Idle")
-            if self._queue and not self._stopping:
-                self._process_next_if_idle()
 
     @pyqtSlot(object)
     def _on_submit_requested(self, command: object) -> None:
         if not isinstance(command, ServiceCommand):
             return
-        self._queue.append(command)
-        self._emit_log("info", f"Queued command {command.action}", command=command)
-        self._emit_command_event(
-            command,
-            {
-                "event": "queued",
-                "message": f"{command.action} queued.",
-                "image_relative_path": command.current_page,
-                "page_total": len(command.image_relative_paths),
-            },
-        )
-        self._emit_status("queued", f"Queued {len(self._queue)} command(s).")
-        self._process_next_if_idle()
+        if not self._ready:
+            self._emit_command_failed(command, message=f"{self.service_name.title()} service is not ready.")
+            return
+        if self._stopping:
+            self._emit_command_failed(command, message=f"{self.service_name.title()} service is stopping.")
+            return
+        if self._active_command is not None:
+            self._emit_command_busy(command, message=f"{self.service_name.title()} worker is busy.")
+            return
+        self._run_command(command)
 
     @pyqtSlot(str)
     def _on_cancel_requested(self, command_id: str) -> None:
@@ -373,15 +350,6 @@ class BaseService(QObject):
         if self._active_command is not None and self._active_command.command_id == normalized_command_id:
             self._active_command.cancel_token.request_cancel()
             self._emit_log("warning", "Cancel requested for active command.", command=self._active_command)
-            return
-        for queued_command in self._queue:
-            if queued_command.command_id != normalized_command_id:
-                continue
-            queued_command.cancel_token.request_cancel()
-            self._queue = deque(cmd for cmd in self._queue if cmd.command_id != normalized_command_id)
-            self._emit_command_canceled(queued_command, message="Command canceled before start.")
-            self._emit_status("idle", "Idle")
-            break
 
     @pyqtSlot()
     def _on_restart_requested(self) -> None:
@@ -403,31 +371,30 @@ class BaseService(QObject):
     @pyqtSlot()
     def _on_shutdown_requested(self) -> None:
         self._stopping = True
-        if self._active_command is None:
-            try:
-                self.on_shutdown()
-            finally:
-                self._emit_status("stopped", "Stopped")
+        if self._active_command is not None:
+            self._active_command.cancel_token.request_cancel()
+            self._emit_status("stopping", "Stopping...")
+            return
+        try:
+            self.on_shutdown()
+        finally:
+            self._ready = False
+            self._emit_status("stopped", "Stopped")
 
 
 class WorkerTaskService(BaseService):
-    """Resident service that runs one of the legacy worker callbacks in a stable thread."""
+    """Compatibility wrapper for services still using legacy stage functions."""
 
     def __init__(
         self,
         service_name: str,
         *,
-        scheduler: ResourceScheduler,
+        scheduler: Any | None = None,
         action_callbacks: dict[str, Callable[[Any, WorkerSignalsBridge], Any]],
-        lane_by_action: dict[str, str | None] | None = None,
         startup_options: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(service_name, scheduler=scheduler, startup_options=startup_options)
         self._action_callbacks = dict(action_callbacks)
-        self._lane_by_action = dict(lane_by_action or {})
-
-    def lane_for_command(self, command: ServiceCommand) -> str | None:
-        return self._lane_by_action.get(command.action)
 
     def execute_command(self, command: ServiceCommand, bridge: WorkerSignalsBridge) -> Any:
         callback = self._action_callbacks.get(command.action)
