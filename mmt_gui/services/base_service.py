@@ -9,6 +9,7 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot
 
+from mmt_core.crash_logging import write_crash_breadcrumb
 from .models import (
     CancelToken,
     ServiceCommand,
@@ -126,11 +127,18 @@ class BaseService(QObject):
 
     @pyqtSlot()
     def initialize(self) -> None:
+        write_crash_breadcrumb("service initialized", service=self.service_name)
         self._emit_status("starting", "Starting resident service...")
         try:
             self.on_initialize()
         except Exception as exc:
             self._ready = False
+            write_crash_breadcrumb(
+                "service error",
+                level="critical",
+                service=self.service_name,
+                exception=str(exc),
+            )
             self._emit_log("error", f"Service startup failed: {exc}")
             self._emit_status("error", str(exc))
             return
@@ -142,6 +150,7 @@ class BaseService(QObject):
             return
 
         self._ready = True
+        write_crash_breadcrumb("service ready", service=self.service_name)
         self._emit_status("ready", "Ready")
         self._emit_status("idle", "Idle")
 
@@ -301,20 +310,60 @@ class BaseService(QObject):
             raise ServiceCanceledError(message or "Command canceled.")
 
     def _run_command(self, command: ServiceCommand) -> None:
+        write_crash_breadcrumb(
+            "_run_command entered",
+            service=self.service_name,
+            action=command.action,
+            command_id=command.command_id,
+        )
         self._active_command = command
         self._emit_status("busy", f"Running {command.action}...", action=command.action)
         self._emit_command_started(command, message=f"{command.action} started.")
         try:
             self._check_canceled(command)
             bridge = self._build_bridge(command)
+            write_crash_breadcrumb(
+                "before execute_command",
+                service=self.service_name,
+                action=command.action,
+                command_id=command.command_id,
+            )
             result = self.execute_command(command, bridge)
+            write_crash_breadcrumb(
+                "after execute_command",
+                service=self.service_name,
+                action=command.action,
+                command_id=command.command_id,
+            )
         except ServiceCanceledError as exc:
+            write_crash_breadcrumb(
+                "command canceled",
+                level="warning",
+                service=self.service_name,
+                action=command.action,
+                command_id=command.command_id,
+                error=str(exc),
+            )
             self._emit_log("warning", str(exc), command=command)
             self._emit_command_canceled(command, message=str(exc))
         except Exception as exc:
+            write_crash_breadcrumb(
+                "command failed",
+                level="critical",
+                service=self.service_name,
+                action=command.action,
+                command_id=command.command_id,
+                error=str(exc),
+            )
             self._emit_log("error", f"{exc}\n{traceback.format_exc()}", command=command)
             self._emit_command_failed(command, message=str(exc))
         else:
+            write_crash_breadcrumb(
+                "command finished",
+                service=self.service_name,
+                action=command.action,
+                command_id=command.command_id,
+            )
             self._emit_command_finished(command, result=result)
         finally:
             self._active_command = None
@@ -331,6 +380,12 @@ class BaseService(QObject):
     def _on_submit_requested(self, command: object) -> None:
         if not isinstance(command, ServiceCommand):
             return
+        write_crash_breadcrumb(
+            "_on_submit_requested entered",
+            service=self.service_name,
+            action=command.action,
+            command_id=command.command_id,
+        )
         if not self._ready:
             self._emit_command_failed(command, message=f"{self.service_name.title()} service is not ready.")
             return
@@ -340,6 +395,12 @@ class BaseService(QObject):
         if self._active_command is not None:
             self._emit_command_busy(command, message=f"{self.service_name.title()} worker is busy.")
             return
+        write_crash_breadcrumb(
+            "before _run_command",
+            service=self.service_name,
+            action=command.action,
+            command_id=command.command_id,
+        )
         self._run_command(command)
 
     @pyqtSlot(str)
@@ -361,6 +422,12 @@ class BaseService(QObject):
             self.on_restart()
         except Exception as exc:
             self._ready = False
+            write_crash_breadcrumb(
+                "service error",
+                level="critical",
+                service=self.service_name,
+                exception=str(exc),
+            )
             self._emit_log("error", f"Service restart failed: {exc}")
             self._emit_status("error", str(exc))
             return
@@ -370,6 +437,7 @@ class BaseService(QObject):
 
     @pyqtSlot()
     def _on_shutdown_requested(self) -> None:
+        write_crash_breadcrumb("service shutdown requested", service=self.service_name)
         self._stopping = True
         if self._active_command is not None:
             self._active_command.cancel_token.request_cancel()

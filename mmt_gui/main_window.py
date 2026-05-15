@@ -76,6 +76,7 @@ from mmt_core import (
     validate_ocr_provider_config,
     validate_translation_config,
 )
+from mmt_core.crash_logging import set_project_log_dir, write_crash_breadcrumb
 
 from . import APP_NAME
 from .app_settings import AppSettings
@@ -213,6 +214,7 @@ class MainWindow(QMainWindow):
         self.import_images_action = None
         self.remove_current_page_action = None
         self.toggle_developer_log_action = None
+        self.open_crash_logs_action = None
         self.developer_log_dock: QDockWidget | None = None
         self._busy_stages: set[str] = set()
         self._busy_stage_counts: dict[str, int] = {}
@@ -224,6 +226,8 @@ class MainWindow(QMainWindow):
 
         self.thread_pool = QThreadPool.globalInstance()
         self._active_workers: list[TaskWorker | ServiceCommandHandle] = []
+        set_project_log_dir(None)
+        write_crash_breadcrumb("MainWindow initializing", workspace_root=str(self.workspace_root))
 
         default_server_url = "http://127.0.0.1:8080"
         default_model_path = self.workspace_root / "model" / "paddleocr_vl" / "model.gguf"
@@ -288,6 +292,7 @@ class MainWindow(QMainWindow):
         self._apply_theme_safely(initial_theme, show_error=False)
         self._restore_panel_preferences()
         self._restore_window_settings()
+        self.log(f"Crash logs folder: {self.workspace_root / 'logs'}")
         self._restore_workspace_state()
         self.statusBar().showMessage("Ready")
 
@@ -441,6 +446,12 @@ class MainWindow(QMainWindow):
         self.toggle_developer_log_action.setCheckable(True)
         self.toggle_developer_log_action.setShortcut("Ctrl+Shift+L")
         self.toggle_developer_log_action.triggered.connect(self.toggle_developer_log)
+
+        help_menu = self.menuBar().addMenu("&Help")
+        assert isinstance(help_menu, QMenu)
+
+        self.open_crash_logs_action = help_menu.addAction("Open Crash Logs Folder")
+        self.open_crash_logs_action.triggered.connect(self.open_crash_logs_folder)
 
     def _connect_panel_signals(self) -> None:
         self.project_panel.new_project_requested.connect(self.new_project)
@@ -631,6 +642,7 @@ class MainWindow(QMainWindow):
             return False
 
         self.current_project = project
+        set_project_log_dir(self.current_project.root_dir)
         self._process_stage_status = "missing"
         self._process_active_stage_key = None
         self.process_panel.reset_process_state(scope_text="Current page")
@@ -1023,6 +1035,7 @@ class MainWindow(QMainWindow):
             self.show_error("Failed to create project", str(exc))
             return
 
+        set_project_log_dir(self.current_project.root_dir)
         self._process_stage_status = "missing"
         self._process_active_stage_key = None
         self.process_panel.reset_process_state(scope_text="Current page")
@@ -1786,6 +1799,9 @@ class MainWindow(QMainWindow):
             event_handler=event_handler,
         )
         return handle
+
+    def open_crash_logs_folder(self) -> None:
+        self._open_output_folder(self.workspace_root / "logs")
 
     def _on_service_status_changed(self, payload: object) -> None:
         if not isinstance(payload, ServiceStatusSnapshot):
@@ -3843,6 +3859,12 @@ class MainWindow(QMainWindow):
             self.image_preview.set_box_edit_mode(False)
             self._refresh_preview_for_current_page()
 
+        write_crash_breadcrumb(
+            "MainWindow before creating DetectionTask",
+            task_name=task_name,
+            page_total=len(image_paths),
+            force=force,
+        )
         task = DetectionTask(
             name=task_name,
             stage="detection",
@@ -3851,8 +3873,19 @@ class MainWindow(QMainWindow):
             masks_cache_dir=self.current_project.cache_dir / "masks",
             force=force,
         )
+        write_crash_breadcrumb(
+            "MainWindow after creating DetectionTask",
+            task_name=task.name,
+            page_total=len(task.image_paths),
+            force=task.force,
+        )
         try:
-            self._submit_service_task(
+            write_crash_breadcrumb(
+                "MainWindow before _submit_service_task",
+                task_name=task.name,
+                page_total=len(task.image_paths),
+            )
+            handle = self._submit_service_task(
                 task,
                 progress_label="Detection progress",
                 finished_handler=self._on_detection_worker_finished,
@@ -3862,6 +3895,12 @@ class MainWindow(QMainWindow):
                     task,
                 ),
                 event_handler=lambda payload: self._on_worker_event("detection", payload, is_batch=len(image_paths) > 1),
+            )
+            write_crash_breadcrumb(
+                "MainWindow after _submit_service_task returns",
+                task_name=task.name,
+                page_total=len(task.image_paths),
+                command_id=getattr(handle, "command_id", ""),
             )
         except Exception as exc:
             self.detection_panel.set_actions_enabled(True)

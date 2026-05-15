@@ -66,6 +66,22 @@ def write_runtime_diagnostic(
             os.fsync(handle.fileno())
         except Exception:
             pass
+    try:
+        from .crash_logging import write_crash_breadcrumb
+
+        breadcrumb_details: dict[str, Any] = {
+            "runtime_log_path": str(target_path),
+            "service": str(service or "").strip() or "runtime",
+        }
+        if page:
+            breadcrumb_details["page"] = page
+        if step:
+            breadcrumb_details["step"] = step
+        if extra:
+            breadcrumb_details["extra"] = extra
+        write_crash_breadcrumb(message, **breadcrumb_details)
+    except Exception:
+        pass
     return target_path
 
 

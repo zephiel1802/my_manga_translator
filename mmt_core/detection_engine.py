@@ -14,6 +14,7 @@ from detectors import (
     get_yolov8_seg_bubble_detector,
 )
 from detectors.page_detector import detect_page_regions_layout_first
+from .crash_logging import write_crash_breadcrumb
 
 
 Logger = Callable[[str], None] | None
@@ -96,6 +97,14 @@ class DetectionEngine:
         diagnostics_path: Any | None = None,
         page_name: str = "",
     ) -> PageDetectionResult:
+        current_page = page_name
+        write_crash_breadcrumb(
+            "DetectionEngine.detect_image entered",
+            page=current_page,
+            has_layout_detector=self.layout_detector is not None,
+            has_bubble_detector=self.bubble_detector is not None,
+            has_text_detector=self.text_detector is not None,
+        )
         del diagnostics_path, page_name
         missing = self.missing_detectors()
         if missing:
@@ -106,12 +115,15 @@ class DetectionEngine:
                 "Active detection does not support getter fallback or partial debug-disable pipelines."
             )
         _log(logger, "Running resident detection inference...")
-        return detect_page_regions_layout_first(
+        write_crash_breadcrumb("before detect_page_regions_layout_first", page=current_page)
+        result = detect_page_regions_layout_first(
             image,
             layout_detector=self.layout_detector,
             bubble_detector=self.bubble_detector,
             text_detector=self.text_detector,
         )
+        write_crash_breadcrumb("after detect_page_regions_layout_first", page=current_page)
+        return result
 
 
 def _log(logger: Logger, message: str) -> None:

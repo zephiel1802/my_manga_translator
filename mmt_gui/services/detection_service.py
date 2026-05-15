@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 from typing import Any
 
+from mmt_core.crash_logging import write_crash_breadcrumb
 from mmt_core.detection_engine import DetectionEngine
 from mmt_core.detection_io import save_detection_result
 from mmt_core.image_io import ensure_path, load_image_bgr
@@ -68,6 +69,12 @@ class DetectionService(BaseService):
     def execute_command(self, command: ServiceCommand, bridge: WorkerSignalsBridge) -> Any:
         task = command.task
         if isinstance(task, DetectionTask):
+            write_crash_breadcrumb(
+                "DetectionService command received",
+                command_id=command.command_id,
+                action=command.action,
+                page_total=len(task.image_paths),
+            )
             return self._run_detection_task(command, task, bridge)
         if command.action == "reload_models":
             self.on_restart()
@@ -91,11 +98,23 @@ class DetectionService(BaseService):
         page_results: list[DetectionPageResult] = []
         bridge.message.emit(f"Starting detection for {total_pages} page(s).")
         bridge.progress.emit(0)
+        write_crash_breadcrumb(
+            "DetectionService before page loop",
+            command_id=command.command_id,
+            page_total=total_pages,
+        )
         self._diag_for_task(task, step="command_start", message=f"detection command received ({total_pages} page(s))")
 
         for index, image_path in enumerate(task.image_paths, start=1):
             self._check_canceled(command, message="Detection canceled before the next page.")
             page_path = Path(image_path)
+            write_crash_breadcrumb(
+                "DetectionService before each page",
+                command_id=command.command_id,
+                page=str(page_path),
+                page_index=index,
+                page_total=total_pages,
+            )
             bridge.event.emit(
                 {
                     "stage": "detection",
@@ -191,6 +210,7 @@ class DetectionService(BaseService):
             return detection_json_path
 
         bridge.message.emit(f"Loading image for detection: {source_image_path.name}")
+        write_crash_breadcrumb("DetectionService before load image", page=source_image_path.name)
         write_runtime_diagnostic(
             "before load image",
             log_path=diagnostics_path,
@@ -199,6 +219,7 @@ class DetectionService(BaseService):
             step="before_load_image",
         )
         image = load_image_bgr(source_image_path)
+        write_crash_breadcrumb("DetectionService after load image", page=source_image_path.name)
         write_runtime_diagnostic(
             "after load image",
             log_path=diagnostics_path,
@@ -208,6 +229,7 @@ class DetectionService(BaseService):
         )
 
         bridge.message.emit(f"Running detection: {source_image_path.name}")
+        write_crash_breadcrumb("DetectionService before engine.detect_image", page=source_image_path.name)
         write_runtime_diagnostic(
             "before detect_image",
             log_path=diagnostics_path,
@@ -221,6 +243,7 @@ class DetectionService(BaseService):
             diagnostics_path=diagnostics_path,
             page_name=source_image_path.name,
         )
+        write_crash_breadcrumb("DetectionService after engine.detect_image", page=source_image_path.name)
         write_runtime_diagnostic(
             "after detect_image",
             log_path=diagnostics_path,
@@ -229,6 +252,7 @@ class DetectionService(BaseService):
             step="after_detect_image",
         )
 
+        write_crash_breadcrumb("DetectionService before save_detection_result", page=source_image_path.name)
         write_runtime_diagnostic(
             "before save_detection_result",
             log_path=diagnostics_path,
@@ -245,6 +269,7 @@ class DetectionService(BaseService):
             project_root=project_root,
             logger=bridge.message.emit,
         )
+        write_crash_breadcrumb("DetectionService after save_detection_result", page=source_image_path.name)
         write_runtime_diagnostic(
             "after save_detection_result",
             log_path=diagnostics_path,

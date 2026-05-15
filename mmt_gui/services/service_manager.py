@@ -10,6 +10,7 @@ from typing import Any
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
+from mmt_core.crash_logging import write_crash_breadcrumb
 from mmt_gui.workers import (
     DetectionTask,
     ExportTask,
@@ -93,6 +94,11 @@ class ServiceManager(QObject):
         for entry in self._services.values():
             if entry.thread.isRunning():
                 continue
+            write_crash_breadcrumb(
+                "service thread start requested",
+                service=entry.service.objectName() if hasattr(entry.service, "objectName") else "",
+                thread_name=entry.thread.objectName(),
+            )
             entry.thread.start()
 
     def shutdown(self) -> None:
@@ -103,6 +109,11 @@ class ServiceManager(QObject):
             self.cancel_command(command_id_value)
         for entry in self._services.values():
             try:
+                write_crash_breadcrumb(
+                    "service shutdown requested",
+                    service=entry.service.objectName() if hasattr(entry.service, "objectName") else "",
+                    thread_name=entry.thread.objectName(),
+                )
                 entry.service.shutdown_service()  # type: ignore[attr-defined]
             except Exception:
                 pass
@@ -112,9 +123,25 @@ class ServiceManager(QObject):
             entry.thread.wait(4000)
 
     def dispatch_task(self, task: Any) -> ServiceCommandHandle:
+        write_crash_breadcrumb(
+            "ServiceManager dispatch_task entered",
+            task_type=type(task).__name__,
+        )
         service_name, action = self._resolve_service_action(task)
+        write_crash_breadcrumb(
+            "ServiceManager resolved service/action",
+            service=service_name,
+            action=action,
+            task_type=type(task).__name__,
+        )
         self._ensure_service_ready(service_name)
         command = self._build_command(task, service_name=service_name, action=action)
+        write_crash_breadcrumb(
+            "ServiceManager command built",
+            service=service_name,
+            action=action,
+            command_id=command.command_id,
+        )
         handle = ServiceCommandHandle(
             command_id=command.command_id,
             task=task,
@@ -127,8 +154,26 @@ class ServiceManager(QObject):
                 raise ServiceDispatchError("Services are shutting down.")
             self._reserve_service_slot_locked(service_name=service_name, command_id_value=command.command_id)
             self._pending_commands[command.command_id] = pending
+        write_crash_breadcrumb(
+            "ServiceManager service slot reserved",
+            service=service_name,
+            action=action,
+            command_id=command.command_id,
+        )
         try:
+            write_crash_breadcrumb(
+                "ServiceManager before submit_to_service",
+                service=service_name,
+                action=action,
+                command_id=command.command_id,
+            )
             self._submit_to_service(command)
+            write_crash_breadcrumb(
+                "ServiceManager after submit_to_service",
+                service=service_name,
+                action=action,
+                command_id=command.command_id,
+            )
         except Exception:
             with self._lock:
                 self._pending_commands.pop(command.command_id, None)
@@ -251,7 +296,20 @@ class ServiceManager(QObject):
     def _register_service(self, service_name: str, service: QObject) -> None:
         thread = QThread(self)
         thread.setObjectName(f"MMT{str(service_name).title()}ServiceThread")
+        service.setObjectName(f"{str(service_name).strip().lower()}_service")
         service.moveToThread(thread)
+        write_crash_breadcrumb(
+            "service thread created",
+            service=service_name,
+            thread_name=thread.objectName(),
+        )
+        thread.started.connect(
+            lambda service_name=service_name, thread_name=thread.objectName(): write_crash_breadcrumb(
+                "service thread started",
+                service=service_name,
+                thread_name=thread_name,
+            )
+        )
         thread.started.connect(service.initialize)  # type: ignore[attr-defined]
         service.status_changed.connect(self._on_service_status_changed)  # type: ignore[attr-defined]
         service.command_started.connect(self._on_service_command_started)  # type: ignore[attr-defined]
@@ -261,6 +319,13 @@ class ServiceManager(QObject):
         service.command_failed.connect(self._on_service_command_failed)  # type: ignore[attr-defined]
         service.command_canceled.connect(self._on_service_command_canceled)  # type: ignore[attr-defined]
         service.log_message.connect(self._on_service_log_message)  # type: ignore[attr-defined]
+        thread.finished.connect(
+            lambda service_name=service_name, thread_name=thread.objectName(): write_crash_breadcrumb(
+                "service thread finished",
+                service=service_name,
+                thread_name=thread_name,
+            )
+        )
         thread.finished.connect(service.deleteLater)
         self._services[str(service_name).strip().lower()] = _ServiceEntry(thread=thread, service=service)
         self._service_statuses[str(service_name).strip().lower()] = ServiceStatusSnapshot(
