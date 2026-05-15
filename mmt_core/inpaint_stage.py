@@ -28,7 +28,7 @@ from .inpaint_masks import (
     build_bubble_guidance_mask,
     build_crop_windows_from_boxes,
     build_preview_mask,
-    build_text_mask_from_canon_items,
+    build_text_mask_from_canon_ocr_bboxes,
 )
 from .ocr_io import load_ocr_json, ocr_json_path
 
@@ -73,6 +73,7 @@ class LamaInpainterManager:
         self._loaded = False
         self._last_device: str | None = None
         self._owner_thread_id: int | None = None
+        self._active_use_count = 0
         self._lock = threading.RLock()
 
     def get_inpainter(
@@ -97,12 +98,20 @@ class LamaInpainterManager:
                 int(pad_mod),
             )
             current_thread_id = threading.get_ident()
+            if self._active_use_count > 0 and self._owner_thread_id not in {None, current_thread_id}:
+                raise RuntimeError(
+                    "LaMa Manga is busy in another worker thread. Please wait for the current inpaint task to finish."
+                )
             if self._inpainter is not None and self._owner_thread_id not in {None, current_thread_id}:
                 # Recreate the inpainter in the worker thread that is about to use it.
-                self.unload()
+                self._unload_unlocked()
 
             if self._inpainter is None or self._signature != signature:
-                self.unload()
+                if self._active_use_count > 0:
+                    raise RuntimeError(
+                        "LaMa Manga is busy and cannot change configuration until the current inpaint task finishes."
+                    )
+                self._unload_unlocked()
                 inpainting_module = _import_inpainting()
                 self._inpainter = inpainting_module.LamaMangaInpainter(
                     model_path=model_path,
@@ -126,6 +135,15 @@ class LamaInpainterManager:
                 )
 
             return self._inpainter
+
+    def begin_inpaint_use(self) -> None:
+        with self._lock:
+            self._active_use_count += 1
+
+    def end_inpaint_use(self) -> None:
+        with self._lock:
+            if self._active_use_count > 0:
+                self._active_use_count -= 1
 
     def load(
         self,
@@ -156,39 +174,53 @@ class LamaInpainterManager:
 
     def unload(self) -> dict[str, Any]:
         with self._lock:
-            had_model = self._inpainter is not None
-            self._inpainter = None
-            self._signature = None
-            self._loaded = False
-            self._owner_thread_id = None
+            if self._active_use_count > 0:
+                return {
+                    "loaded": bool(self._inpainter is not None and self._loaded),
+                    "device": self._last_device or "",
+                    "message": "LaMa Manga is busy running inpaint. Wait for the current task to finish before unloading.",
+                }
+            return self._unload_unlocked()
 
+    def _unload_unlocked(self) -> dict[str, Any]:
+        had_model = self._inpainter is not None
+        self._inpainter = None
+        self._signature = None
+        self._loaded = False
+        self._owner_thread_id = None
+
+        try:
+            import torch
+        except Exception:
+            torch = None
+
+        if torch is not None and getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
             try:
-                import torch
+                torch.cuda.empty_cache()
             except Exception:
-                torch = None
+                pass
 
-            if torch is not None and getattr(torch, "cuda", None) is not None and torch.cuda.is_available():
-                try:
-                    torch.cuda.empty_cache()
-                except Exception:
-                    pass
-
-            gc.collect()
-            return {
-                "loaded": False,
-                "device": self._last_device or "",
-                "message": "LaMa Manga model cache cleared." if had_model else "LaMa Manga model was not loaded.",
-            }
+        gc.collect()
+        return {
+            "loaded": False,
+            "device": self._last_device or "",
+            "message": "LaMa Manga model cache cleared." if had_model else "LaMa Manga model was not loaded.",
+        }
 
     def status(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "loaded": bool(self._inpainter is not None and self._loaded),
                 "device": self._last_device or "",
+                "busy": self._active_use_count > 0,
                 "message": (
-                    f"LaMa Manga model ready on {self._last_device or 'auto'}."
-                    if self._inpainter is not None and self._loaded
-                    else "LaMa Manga model is not loaded."
+                    f"LaMa Manga model busy on {self._last_device or 'auto'}."
+                    if self._active_use_count > 0
+                    else (
+                        f"LaMa Manga model ready on {self._last_device or 'auto'}."
+                        if self._inpainter is not None and self._loaded
+                        else "LaMa Manga model is not loaded."
+                    )
                 ),
             }
 
@@ -354,6 +386,7 @@ def run_inpaint_for_page(
     )
 
     manager = get_lama_model_manager()
+    inpainter = None
     try:
         _emit_progress(
             progress_callback,
@@ -369,6 +402,7 @@ def run_inpaint_for_page(
             pad_mod=DEFAULT_PAD_MOD,
             preload=True,
         )
+        manager.begin_inpaint_use()
         output_image = inpainter.inpaint(
             source_image,
             text_mask,
@@ -396,6 +430,9 @@ def run_inpaint_for_page(
             message=f"Inpaint failed for {Path(image_relative).name}: {readable_error}",
         )
         raise RuntimeError(readable_error) from exc
+    finally:
+        if inpainter is not None:
+            manager.end_inpaint_use()
 
     metadata["status"] = "done"
     metadata["error"] = ""
@@ -530,14 +567,14 @@ def _prepare_mask_bundle(
             f"Detection cache is missing for {Path(image_relative).name}. Run Detection first."
         )
 
-    text_mask, valid_boxes, masked_pixel_count, mask_stats = build_text_mask_from_canon_items(
+    text_mask, valid_boxes, masked_pixel_count, mask_stats = build_text_mask_from_canon_ocr_bboxes(
         source_image.shape,
         get_active_canon_items(detection_data["canon_state"]),
         padding=mask_padding,
         return_stats=True,
     )
     if not valid_boxes or masked_pixel_count <= 0:
-        error_message = "No active canon text-mask boxes were available to build an inpaint mask."
+        error_message = "No active canon OCR target boxes were available to build an inpaint mask."
         error_metadata = build_inpaint_metadata(
             project_root=project.root_dir,
             image_relative_path=image_relative,
@@ -554,7 +591,7 @@ def _prepare_mask_bundle(
             item_count=0,
             active_item_count=int(mask_stats.get("active_item_count", 0) or 0),
             text_mask_box_count=0,
-            skipped_item_count=int(mask_stats.get("skipped_items_without_text_mask", 0) or 0),
+            skipped_item_count=int(mask_stats.get("skipped_invalid_bbox_count", 0) or 0),
             masked_pixel_count=0,
             bubble_mask_pixel_count=0,
             device=device,
@@ -639,8 +676,8 @@ def _prepare_mask_bundle(
         image_shape=source_image.shape,
         item_count=len(valid_boxes),
         active_item_count=int(mask_stats.get("active_item_count", 0) or 0),
-        text_mask_box_count=int(mask_stats.get("used_text_mask_bboxes", 0) or 0),
-        skipped_item_count=int(mask_stats.get("skipped_items_without_text_mask", 0) or 0),
+        text_mask_box_count=int(mask_stats.get("used_ocr_bboxes", 0) or 0),
+        skipped_item_count=int(mask_stats.get("skipped_invalid_bbox_count", 0) or 0),
         masked_pixel_count=masked_pixel_count,
         bubble_mask_pixel_count=bubble_mask_pixel_count,
         device=device,
@@ -661,8 +698,9 @@ def _prepare_mask_bundle(
         logger,
         "Inpaint mask stats: "
         f"{int(mask_stats.get('active_item_count', 0) or 0)} active items, "
-        f"{int(mask_stats.get('used_text_mask_bboxes', 0) or 0)} text boxes, "
-        f"{int(mask_stats.get('skipped_items_without_text_mask', 0) or 0)} skipped, "
+        f"{int(mask_stats.get('used_ocr_bboxes', 0) or 0)} OCR boxes, "
+        f"{int(mask_stats.get('fallback_to_bbox_count', 0) or 0)} bbox fallbacks, "
+        f"{int(mask_stats.get('skipped_invalid_bbox_count', 0) or 0)} skipped invalid, "
         f"{masked_pixel_count} masked pixels, "
         f"{bubble_mask_pixel_count} bubble-mask pixels.",
     )
@@ -806,8 +844,8 @@ def _hash_mask_image(mask: Any) -> str:
 def _friendly_inpaint_error(exc: Exception) -> str:
     message = str(exc).strip() or exc.__class__.__name__
     lower_message = message.lower()
-    if "no valid ocr bounding boxes" in lower_message:
-        return "No valid OCR bounding boxes were available to build an inpaint mask."
+    if "no valid ocr bounding boxes" in lower_message or "no active canon ocr target boxes" in lower_message:
+        return "No valid OCR target boxes were available to build an inpaint mask."
     if "ocr cache is missing" in lower_message:
         return message
     if "source image is missing" in lower_message:

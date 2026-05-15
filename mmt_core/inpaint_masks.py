@@ -101,14 +101,41 @@ def build_text_mask_from_canon_items(
     min_box_area: int = 16,
     return_stats: bool = False,
 ) -> tuple[Any, list[tuple[int, int, int, int]], int] | tuple[Any, list[tuple[int, int, int, int]], int, dict[str, int]]:
-    """Build a binary text-removal mask from active canon items."""
+    """Build a binary text-removal mask from active canon items.
+
+    Inpaint text removal follows the current OCR target geometry:
+    - primary: canon_state.items[].ocr_bbox
+    - fallback: canon_state.items[].bbox only if ocr_bbox is missing/invalid
+
+    text_mask_bboxes remains legacy/debug geometry and does not override ocr_bbox.
+    """
+
+    return build_text_mask_from_canon_ocr_bboxes(
+        image_shape,
+        canon_items,
+        padding=padding,
+        min_box_area=min_box_area,
+        return_stats=return_stats,
+    )
+
+
+def build_text_mask_from_canon_ocr_bboxes(
+    image_shape: Sequence[int],
+    canon_items: Sequence[dict[str, Any]],
+    *,
+    padding: int = 8,
+    min_box_area: int = 16,
+    return_stats: bool = False,
+) -> tuple[Any, list[tuple[int, int, int, int]], int] | tuple[Any, list[tuple[int, int, int, int]], int, dict[str, int]]:
+    """Build a binary text-removal mask from canon OCR targets."""
 
     np_module = _require_numpy()
     mask = np_module.zeros((int(image_shape[0]), int(image_shape[1])), dtype=np_module.uint8)
     valid_boxes: list[tuple[int, int, int, int]] = []
     active_item_count = 0
-    used_text_mask_bboxes = 0
-    skipped_items_without_text_mask = 0
+    used_ocr_bboxes = 0
+    fallback_to_bbox_count = 0
+    skipped_invalid_bbox_count = 0
 
     for item in canon_items or []:
         if not isinstance(item, dict):
@@ -117,32 +144,25 @@ def build_text_mask_from_canon_items(
             continue
         active_item_count += 1
 
-        raw_boxes = item.get("text_mask_bboxes")
-        if not isinstance(raw_boxes, list) or not raw_boxes:
-            if str(item.get("kind", "") or "").strip().lower() == "bubble":
-                skipped_items_without_text_mask += 1
-                continue
-            fallback_bbox = item.get("bbox") or item.get("ocr_bbox")
-            raw_boxes = [fallback_bbox] if fallback_bbox is not None else []
+        used_fallback = False
+        raw_bbox = item.get("ocr_bbox")
+        resolved_bbox = clamp_bbox(raw_bbox, image_shape)
+        if resolved_bbox is None:
+            raw_bbox = item.get("bbox")
+            resolved_bbox = clamp_bbox(raw_bbox, image_shape)
+            used_fallback = resolved_bbox is not None
 
-        item_valid_boxes: list[tuple[int, int, int, int]] = []
-        for raw_bbox in raw_boxes:
-            resolved_bbox = expand_bbox(clamp_bbox(raw_bbox, image_shape), image_shape, padding)
-            if resolved_bbox is None:
-                continue
-            if bbox_area(resolved_bbox) < int(min_box_area):
-                continue
-            item_valid_boxes.append(resolved_bbox)
-
-        if not item_valid_boxes:
-            skipped_items_without_text_mask += 1
+        resolved_bbox = expand_bbox(resolved_bbox, image_shape, padding)
+        if resolved_bbox is None or bbox_area(resolved_bbox) < int(min_box_area):
+            skipped_invalid_bbox_count += 1
             continue
 
-        for resolved_bbox in item_valid_boxes:
-            x1, y1, x2, y2 = resolved_bbox
-            mask[y1:y2, x1:x2] = 255
-            valid_boxes.append(resolved_bbox)
-        used_text_mask_bboxes += len(item_valid_boxes)
+        x1, y1, x2, y2 = resolved_bbox
+        mask[y1:y2, x1:x2] = 255
+        valid_boxes.append(resolved_bbox)
+        used_ocr_bboxes += 1
+        if used_fallback:
+            fallback_to_bbox_count += 1
 
     mask = _close_mask(mask, 3 if padding <= 4 else 5)
     mask = np_module.where(mask > 0, 255, 0).astype(np_module.uint8)
@@ -151,8 +171,11 @@ def build_text_mask_from_canon_items(
         return mask, valid_boxes, masked_pixel_count
     return mask, valid_boxes, masked_pixel_count, {
         "active_item_count": active_item_count,
-        "used_text_mask_bboxes": used_text_mask_bboxes,
-        "skipped_items_without_text_mask": skipped_items_without_text_mask,
+        "used_ocr_bboxes": used_ocr_bboxes,
+        "fallback_to_bbox_count": fallback_to_bbox_count,
+        "skipped_invalid_bbox_count": skipped_invalid_bbox_count,
+        "used_text_mask_bboxes": used_ocr_bboxes,
+        "skipped_items_without_text_mask": skipped_invalid_bbox_count,
     }
 
 
@@ -283,6 +306,7 @@ def _close_mask(mask, kernel_size: int) -> Any:
 __all__ = [
     "bbox_area",
     "build_bubble_guidance_mask",
+    "build_text_mask_from_canon_ocr_bboxes",
     "build_text_mask_from_canon_items",
     "build_crop_windows_from_boxes",
     "build_preview_mask",

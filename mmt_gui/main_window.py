@@ -161,6 +161,8 @@ PREVIEW_MASK = "Mask Overlay"
 PREVIEW_INPAINT = "Inpaint Result"
 PREVIEW_RENDER = "Render Result"
 
+HEAVY_MODEL_STAGE_KEYS = {"detection", "inpaint"}
+
 PREVIEW_MODES_BY_STAGE: dict[str, list[str]] = {
     "process": [PREVIEW_SOURCE, PREVIEW_DETECTION, PREVIEW_MASK, PREVIEW_INPAINT, PREVIEW_RENDER],
     "project": [PREVIEW_SOURCE],
@@ -1736,6 +1738,33 @@ class MainWindow(QMainWindow):
 
     def _workflow_busy(self) -> bool:
         return bool(self._active_workers or self._busy_stages)
+
+    def _heavy_model_busy_stage(self, *, excluding_stage: str | None = None) -> str | None:
+        excluded = str(excluding_stage or "").strip().lower()
+        for stage_name in self._busy_stages:
+            normalized = str(stage_name or "").strip().lower()
+            if normalized in HEAVY_MODEL_STAGE_KEYS and normalized != excluded:
+                return normalized
+        for worker in self._active_workers:
+            normalized = str(getattr(getattr(worker, "task", None), "stage", "") or "").strip().lower()
+            if normalized in HEAVY_MODEL_STAGE_KEYS and normalized != excluded:
+                return normalized
+        return None
+
+    def _ensure_heavy_model_stage_available(self, *, requested_stage: str, action_label: str) -> bool:
+        busy_stage = self._heavy_model_busy_stage(excluding_stage=requested_stage)
+        if not busy_stage:
+            return True
+
+        busy_label = "Detection" if busy_stage == "detection" else "Inpaint"
+        message = (
+            f"Another model task is running ({busy_label}). "
+            f"Please wait for it to finish before starting {action_label}."
+        )
+        self.statusBar().showMessage(message)
+        self.log(message, level="warning")
+        self.show_error("Another model task is running", message)
+        return False
 
     def process_current_page(self, force: bool = False) -> None:
         if not self._ensure_current_editor_changes_resolved():
@@ -3712,6 +3741,11 @@ class MainWindow(QMainWindow):
         if "detection" in self._busy_stages:
             self.show_error("Detection is already running", "Wait for the current detection task to finish first.")
             return
+        if not self._ensure_heavy_model_stage_available(
+            requested_stage="detection",
+            action_label="Detection",
+        ):
+            return
         if self._active_workers or self._busy_stages:
             self.show_error(
                 "Workflow already running",
@@ -3921,6 +3955,20 @@ class MainWindow(QMainWindow):
         if self.current_project is None:
             self.show_error("No project open", "Create or open a project before preparing inpaint masks.")
             return
+        if "inpaint" in self._busy_stages:
+            self.show_error("Inpaint is already running", "Wait for the current inpaint task to finish first.")
+            return
+        if not self._ensure_heavy_model_stage_available(
+            requested_stage="inpaint",
+            action_label="inpaint mask preparation",
+        ):
+            return
+        if self._active_workers or self._busy_stages:
+            self.show_error(
+                "Workflow already running",
+                "Wait for the current workflow task to finish before preparing inpaint masks.",
+            )
+            return
         self._persist_panel_preferences()
 
         settings = self.inpaint_panel.settings(force_override=force)
@@ -3961,6 +4009,20 @@ class MainWindow(QMainWindow):
         if self.current_project is None:
             self.show_error("No project open", "Create or open a project before running inpaint.")
             return
+        if "inpaint" in self._busy_stages:
+            self.show_error("Inpaint is already running", "Wait for the current inpaint task to finish first.")
+            return
+        if not self._ensure_heavy_model_stage_available(
+            requested_stage="inpaint",
+            action_label="Inpaint",
+        ):
+            return
+        if self._active_workers or self._busy_stages:
+            self.show_error(
+                "Workflow already running",
+                "Wait for the current workflow task to finish before starting inpaint.",
+            )
+            return
         self._persist_panel_preferences()
 
         settings = self.inpaint_panel.settings(force_override=force)
@@ -3994,6 +4056,23 @@ class MainWindow(QMainWindow):
         self.thread_pool.start(worker)
 
     def _start_lama_model_task(self, action: str) -> None:
+        if "inpaint" in self._busy_stages:
+            message = "Wait for the current inpaint task to finish before changing the LaMa model state."
+            self.statusBar().showMessage(message)
+            self.log(message, level="warning")
+            self.show_error("LaMa model busy", message)
+            return
+        if not self._ensure_heavy_model_stage_available(
+            requested_stage="inpaint",
+            action_label=f"LaMa model {action}",
+        ):
+            return
+        if self._active_workers or self._busy_stages:
+            self.show_error(
+                "Workflow already running",
+                "Wait for the current workflow task to finish before changing the LaMa model state.",
+            )
+            return
         task = LamaModelTask(
             name=f"LaMa model: {action}",
             stage="inpaint",
@@ -6154,7 +6233,11 @@ class MainWindow(QMainWindow):
 
     def _sync_lama_status_label(self) -> None:
         model_status = get_lama_model_manager().status()
-        if model_status.get("loaded"):
+        if model_status.get("busy"):
+            self.inpaint_panel.set_model_status(
+                f"Busy ({model_status.get('device', 'auto') or 'auto'})"
+            )
+        elif model_status.get("loaded"):
             self.inpaint_panel.set_model_status(
                 f"Loaded ({model_status.get('device', 'auto') or 'auto'})"
             )
