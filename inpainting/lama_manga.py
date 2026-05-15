@@ -459,12 +459,40 @@ class LamaMangaInpainter:
         rgb_image = working_image[:, :, ::-1].astype(np_module.float32) / 255.0
         mask_array = np_module.where(remaining_mask > 0, 1.0, 0.0).astype(np_module.float32)
 
-        image_tensor = torch.from_numpy(rgb_image.transpose(2, 0, 1)).unsqueeze(0).to(self.device, dtype=torch.float32)
-        mask_tensor = torch.from_numpy(mask_array).unsqueeze(0).unsqueeze(0).to(self.device, dtype=torch.float32)
+        image_tensor = torch.from_numpy(rgb_image.transpose(2, 0, 1)).unsqueeze(0)
+        mask_tensor = torch.from_numpy(mask_array).unsqueeze(0).unsqueeze(0)
+        _write_lama_breadcrumb(
+            "before image tensor to cuda",
+            target_device=str(self.device or ""),
+            shape=tuple(int(dim) for dim in image_tensor.shape),
+            dtype=str(image_tensor.dtype),
+        )
+        image_tensor = image_tensor.to(self.device, dtype=torch.float32)
+        _write_lama_breadcrumb(
+            "after image tensor to cuda",
+            target_device=str(self.device or ""),
+            shape=tuple(int(dim) for dim in image_tensor.shape),
+            dtype=str(image_tensor.dtype),
+        )
+        _write_lama_breadcrumb(
+            "before mask tensor to cuda",
+            target_device=str(self.device or ""),
+            shape=tuple(int(dim) for dim in mask_tensor.shape),
+            dtype=str(mask_tensor.dtype),
+        )
+        mask_tensor = mask_tensor.to(self.device, dtype=torch.float32)
+        _write_lama_breadcrumb(
+            "after mask tensor to cuda",
+            target_device=str(self.device or ""),
+            shape=tuple(int(dim) for dim in mask_tensor.shape),
+            dtype=str(mask_tensor.dtype),
+        )
 
         try:
+            _write_lama_breadcrumb("before LaMa model forward", target_device=str(self.device or ""))
             with torch.no_grad():
                 output_tensor = self._model(image_tensor, mask_tensor)
+            _write_lama_breadcrumb("after LaMa model forward", target_device=str(self.device or ""))
             output_rgb = output_tensor.squeeze(0).detach().cpu().clamp(0.0, 1.0).numpy().transpose(1, 2, 0)
         finally:
             del image_tensor
@@ -567,3 +595,12 @@ __all__ = [
     "LamaMangaUnavailable",
     "ensure_lama_manga_weights",
 ]
+
+
+def _write_lama_breadcrumb(message: str, **details) -> None:
+    try:
+        from mmt_core.crash_logging import write_crash_breadcrumb
+
+        write_crash_breadcrumb(message, runtime="lama_manga", **details)
+    except Exception:
+        pass
