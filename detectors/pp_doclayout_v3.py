@@ -600,15 +600,116 @@ class PPDocLayoutV3Detector:
 
         torch = importlib.import_module("torch")
         inputs, original_size = self._prepare_model_inputs(image)
-        prepared_inputs = {
-            key: value.to(self.device) if hasattr(value, "to") else value
-            for key, value in inputs.items()
-        }
+        target_device = str(self.device or "")
+        use_cuda_transfer = target_device.startswith("cuda")
 
-        _write_pp_layout_breadcrumb("before PPLayout model forward")
+        _write_pp_layout_breadcrumb(
+            "before PPLayout input transfer block",
+            target_device=target_device,
+            input_keys=tuple(str(key) for key in inputs.keys()),
+        )
+        prepared_inputs: dict[str, Any] = {}
+        for key, value in inputs.items():
+            if not hasattr(value, "to"):
+                prepared_inputs[key] = value
+                continue
+
+            _write_pp_layout_breadcrumb(
+                "before PPLayout tensor prepare",
+                **_tensor_breadcrumb_details(value, key=key, target_device=target_device),
+            )
+            tensor = value.contiguous() if hasattr(value, "contiguous") else value
+            _write_pp_layout_breadcrumb(
+                "after PPLayout tensor contiguous",
+                **_tensor_breadcrumb_details(tensor, key=key, target_device=target_device),
+            )
+
+            if use_cuda_transfer:
+                if _tensor_device_type(tensor) == "cpu" and hasattr(tensor, "pin_memory"):
+                    _write_pp_layout_breadcrumb(
+                        "before PPLayout tensor pin_memory",
+                        **_tensor_breadcrumb_details(tensor, key=key, target_device=target_device),
+                    )
+                    try:
+                        tensor = tensor.pin_memory()
+                        _write_pp_layout_breadcrumb(
+                            "after PPLayout tensor pin_memory",
+                            **_tensor_breadcrumb_details(tensor, key=key, target_device=target_device),
+                        )
+                    except Exception as exc:
+                        _write_pp_layout_breadcrumb(
+                            "PPLayout tensor pin_memory failed; continuing without pinning",
+                            level="warning",
+                            error=str(exc),
+                            **_tensor_breadcrumb_details(tensor, key=key, target_device=target_device),
+                        )
+
+                _write_pp_layout_breadcrumb(
+                    "before PPLayout tensor to cuda",
+                    **_tensor_breadcrumb_details(tensor, key=key, target_device=target_device),
+                )
+                tensor = tensor.to(target_device, non_blocking=True)
+                _write_pp_layout_breadcrumb(
+                    "after PPLayout tensor to cuda",
+                    **_tensor_breadcrumb_details(tensor, key=key, target_device=target_device),
+                )
+                if hasattr(torch, "cuda") and torch.cuda.is_available():
+                    _write_pp_layout_breadcrumb(
+                        "before PPLayout cuda synchronize after transfer",
+                        **_tensor_breadcrumb_details(tensor, key=key, target_device=target_device),
+                    )
+                    torch.cuda.current_stream(device=tensor.device).synchronize()
+                    _write_pp_layout_breadcrumb(
+                        "after PPLayout cuda synchronize after transfer",
+                        **_tensor_breadcrumb_details(tensor, key=key, target_device=target_device),
+                    )
+            else:
+                _write_pp_layout_breadcrumb(
+                    "before PPLayout tensor to device",
+                    **_tensor_breadcrumb_details(tensor, key=key, target_device=target_device),
+                )
+                tensor = tensor.to(target_device)
+                _write_pp_layout_breadcrumb(
+                    "after PPLayout tensor to device",
+                    **_tensor_breadcrumb_details(tensor, key=key, target_device=target_device),
+                )
+
+            prepared_inputs[key] = tensor
+
+        _write_pp_layout_breadcrumb(
+            "after PPLayout input transfer block",
+            target_device=target_device,
+            input_devices={key: _tensor_device_string(value) for key, value in prepared_inputs.items()},
+        )
+
+        model_param_device = _model_parameter_device(self._model)
+        if target_device and model_param_device and model_param_device != target_device and hasattr(self._model, "to"):
+            _write_pp_layout_breadcrumb(
+                "before PPLayout model.to(self.device)",
+                model_device=model_param_device,
+                target_device=target_device,
+            )
+            self._model.to(target_device)
+            model_param_device = _model_parameter_device(self._model)
+            _write_pp_layout_breadcrumb(
+                "after PPLayout model.to(self.device)",
+                model_device=model_param_device,
+                target_device=target_device,
+            )
+
+        _write_pp_layout_breadcrumb(
+            "before PPLayout model forward",
+            target_device=target_device,
+            model_device=model_param_device,
+            input_devices={key: _tensor_device_string(value) for key, value in prepared_inputs.items()},
+        )
         with torch.inference_mode():
             outputs = self._model(**prepared_inputs)
-        _write_pp_layout_breadcrumb("after PPLayout model forward")
+        _write_pp_layout_breadcrumb(
+            "after PPLayout model forward",
+            target_device=target_device,
+            model_device=model_param_device,
+        )
 
         processed_output = None
         post_process = getattr(self._image_processor, "post_process_object_detection", None)
@@ -699,6 +800,59 @@ def _write_pp_layout_breadcrumb(message: str, **details: Any) -> None:
         write_crash_breadcrumb(message, detector="pp_doclayout_v3", **details)
     except Exception:
         pass
+
+
+def _tensor_device_string(value: Any) -> str:
+    try:
+        device = getattr(value, "device", None)
+        if device is None:
+            return ""
+        return str(device)
+    except Exception:
+        return ""
+
+
+def _tensor_device_type(value: Any) -> str:
+    try:
+        device = getattr(value, "device", None)
+        if device is None:
+            return ""
+        return str(getattr(device, "type", "") or "")
+    except Exception:
+        return ""
+
+
+def _tensor_is_pinned(value: Any) -> bool | None:
+    try:
+        is_pinned = getattr(value, "is_pinned", None)
+        if callable(is_pinned):
+            return bool(is_pinned())
+    except Exception:
+        return None
+    return None
+
+
+def _tensor_breadcrumb_details(value: Any, *, key: str, target_device: str) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "key": str(key),
+        "source_device": _tensor_device_string(value),
+        "target_device": str(target_device or ""),
+        "shape": tuple(int(dim) for dim in getattr(value, "shape", ()) or ()),
+        "dtype": str(getattr(value, "dtype", "")),
+        "is_contiguous": bool(value.is_contiguous()) if hasattr(value, "is_contiguous") else None,
+    }
+    is_pinned = _tensor_is_pinned(value)
+    if is_pinned is not None:
+        details["is_pinned"] = is_pinned
+    return details
+
+
+def _model_parameter_device(model: Any) -> str:
+    try:
+        first_param = next(model.parameters())
+    except Exception:
+        return ""
+    return _tensor_device_string(first_param)
 
 
 __all__ = [
