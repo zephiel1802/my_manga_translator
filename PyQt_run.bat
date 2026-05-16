@@ -1,7 +1,7 @@
 @echo off
 title Manga Translator Gemini
 
-cd /d "C:\New folder\Manga-translator_Gemini\"
+cd /d "C:\Nghich\Manga-translator\"
 
 if not exist ".venv\Scripts\activate.bat" (
     echo Khong tim thay file .venv\Scripts\activate.bat

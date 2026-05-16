@@ -17,6 +17,7 @@ from .ocr_image_preprocess import (
     DEFAULT_MIN_SHORT_SIDE,
     save_ocr_provider_image,
 )
+from .deepseek_ocr_client import DeepSeekOCRClientError
 from .ocr_models import DEFAULT_OCR_PROVIDER, OCRConfig
 from .ocr_io import (
     load_ocr_json,
@@ -324,7 +325,7 @@ def run_ocr_for_page(
                 item["updated_at"] = _timestamp()
                 item["needs_ocr"] = True
                 _log(logger, f"OCR item {item_id} failed: {item['error']}")
-            except (OCRProviderError, PaddleOCRVLClientError, FileNotFoundError) as exc:
+            except (OCRProviderError, PaddleOCRVLClientError, DeepSeekOCRClientError, FileNotFoundError) as exc:
                 item["status"] = "error"
                 item["error"] = str(exc)
                 item["updated_at"] = _timestamp()

@@ -1,4 +1,4 @@
-"""Persistent llama.cpp server management for PaddleOCR-VL."""
+"""Persistent llama.cpp server management for OCR providers."""
 
 from __future__ import annotations
 

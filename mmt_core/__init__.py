@@ -71,6 +71,7 @@ from .ocr_io import (
 from .ocr_models import (
     DEFAULT_OCR_PROVIDER,
     OCR_PROVIDER_CHROME_LENS,
+    OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
     OCR_PROVIDER_CHOICES,
     OCR_PROVIDER_PADDLE_VL_LLAMA,
     OCRConfig,
@@ -81,6 +82,13 @@ from .ocr_providers import (
     OCRProviderError,
     create_ocr_provider,
     validate_ocr_provider_config,
+)
+from .deepseek_ocr_client import (
+    DEFAULT_MAX_TOKENS as DEEPSEEK_OCR_DEFAULT_MAX_TOKENS,
+    DEFAULT_PROMPT as DEEPSEEK_OCR_DEFAULT_PROMPT,
+    DEFAULT_TEMPERATURE as DEEPSEEK_OCR_DEFAULT_TEMPERATURE,
+    DeepSeekOCRClient,
+    DeepSeekOCRClientError,
 )
 from .ocr_edit import (
     exclude_ocr_item,
@@ -230,8 +238,14 @@ __all__ = [
     "OCRConfig",
     "OCRProviderError",
     "OCR_PROVIDER_CHROME_LENS",
+    "OCR_PROVIDER_DEEPSEEK_OCR_LLAMA",
     "OCR_PROVIDER_CHOICES",
     "OCR_PROVIDER_PADDLE_VL_LLAMA",
+    "DEEPSEEK_OCR_DEFAULT_MAX_TOKENS",
+    "DEEPSEEK_OCR_DEFAULT_PROMPT",
+    "DEEPSEEK_OCR_DEFAULT_TEMPERATURE",
+    "DeepSeekOCRClient",
+    "DeepSeekOCRClientError",
     "PROMPT_MODE_BUILT_IN_PLUS_USER",
     "PROMPT_MODE_CHOICES",
     "PROMPT_MODE_FULL_CUSTOM",

@@ -28,6 +28,7 @@ from mmt_core import (
     OCRConfig,
     OCR_PROVIDER_CHOICES,
     OCR_PROVIDER_CHROME_LENS,
+    OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
     OCR_PROVIDER_PADDLE_VL_LLAMA,
     normalize_ocr_provider_name,
     summarize_ocr_edit_state,
@@ -128,7 +129,7 @@ class OCRPanel(StagePanel):
         self.chrome_lens_section.content_layout.addLayout(chrome_form)
         self.content_layout.addWidget(self.chrome_lens_section)
 
-        self.server_section = CollapsibleSection("PaddleOCR-VL Server", expanded=True)
+        self.server_section = CollapsibleSection("OCR llama.cpp Server", expanded=True)
         self.server_url_input = QLineEdit()
         self.server_model_path_input = QLineEdit()
         self.server_mmproj_path_input = QLineEdit()
@@ -540,9 +541,13 @@ class OCRPanel(StagePanel):
         self.ocr_provider_changed.emit(self.selected_ocr_provider())
 
     def _update_provider_sections(self) -> None:
-        is_paddle = self.selected_ocr_provider() == OCR_PROVIDER_PADDLE_VL_LLAMA
-        self.server_section.setVisible(is_paddle)
-        self.chrome_lens_section.setVisible(not is_paddle)
+        provider = self.selected_ocr_provider()
+        uses_llama_server = provider in {
+            OCR_PROVIDER_PADDLE_VL_LLAMA,
+            OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
+        }
+        self.server_section.setVisible(uses_llama_server)
+        self.chrome_lens_section.setVisible(provider == OCR_PROVIDER_CHROME_LENS)
 
     def set_project_root(self, project_root: Path | None) -> None:
         self._project_root = project_root.resolve() if isinstance(project_root, Path) else None

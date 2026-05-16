@@ -6,16 +6,19 @@ from dataclasses import dataclass
 from typing import Any
 
 OCR_PROVIDER_PADDLE_VL_LLAMA = "paddleocr_vl_llama"
+OCR_PROVIDER_DEEPSEEK_OCR_LLAMA = "deepseek_ocr_llama"
 OCR_PROVIDER_CHROME_LENS = "chrome_lens"
 DEFAULT_OCR_PROVIDER = OCR_PROVIDER_PADDLE_VL_LLAMA
 
 OCR_PROVIDER_CHOICES = (
     (OCR_PROVIDER_PADDLE_VL_LLAMA, "PaddleOCR-VL Local"),
+    (OCR_PROVIDER_DEEPSEEK_OCR_LLAMA, "DeepSeek OCR (llama.cpp)"),
     (OCR_PROVIDER_CHROME_LENS, "Chrome Lens"),
 )
 
 OCR_PROVIDER_LABELS = {
     OCR_PROVIDER_PADDLE_VL_LLAMA: "PaddleOCR-VL Local",
+    OCR_PROVIDER_DEEPSEEK_OCR_LLAMA: "DeepSeek OCR (llama.cpp)",
     OCR_PROVIDER_CHROME_LENS: "Chrome Lens",
 }
 
@@ -29,6 +32,12 @@ def normalize_ocr_provider_name(name: str, *, fallback: str = DEFAULT_OCR_PROVID
         "paddleocr_vl": OCR_PROVIDER_PADDLE_VL_LLAMA,
         "paddleocr_vl_local": OCR_PROVIDER_PADDLE_VL_LLAMA,
         "paddleocr": OCR_PROVIDER_PADDLE_VL_LLAMA,
+        "deepseek_ocr_llama": OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
+        "deepseek_ocr": OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
+        "deepseek": OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
+        "deepseek_ocr_gguf": OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
+        "deepseek_ocr_llamacpp": OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
+        "deepseek_ocr_llama_cpp": OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
         "chrome_lens": OCR_PROVIDER_CHROME_LENS,
         "chrome_lens_ocr": OCR_PROVIDER_CHROME_LENS,
         "chrome_lens_local": OCR_PROVIDER_CHROME_LENS,
@@ -90,7 +99,10 @@ class OCRConfig:
 
     @property
     def requires_llama_server(self) -> bool:
-        return self.ocr_provider == OCR_PROVIDER_PADDLE_VL_LLAMA
+        return self.ocr_provider in {
+            OCR_PROVIDER_PADDLE_VL_LLAMA,
+            OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
+        }
 
     def to_metadata(self) -> dict[str, Any]:
         return {
@@ -124,6 +136,7 @@ def _coerce_positive_float(value: Any, default: float) -> float:
 __all__ = [
     "DEFAULT_OCR_PROVIDER",
     "OCR_PROVIDER_CHROME_LENS",
+    "OCR_PROVIDER_DEEPSEEK_OCR_LLAMA",
     "OCR_PROVIDER_CHOICES",
     "OCR_PROVIDER_LABELS",
     "OCR_PROVIDER_PADDLE_VL_LLAMA",
