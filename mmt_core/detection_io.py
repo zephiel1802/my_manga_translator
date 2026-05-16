@@ -9,6 +9,7 @@ from typing import Any, Callable, Protocol, Sequence
 
 from detectors.base import BubbleRegion, LayoutRegion, PageDetectionResult, TextRegion
 
+from .detection_region_sanitizer import sanitize_detection_payload
 from .image_io import ensure_path, project_relative_path, save_png_image
 from .json_io import write_json_atomic
 
@@ -88,6 +89,8 @@ def save_detection_result(
 
     for layout_index, layout_region in enumerate(result.layout_regions):
         payload["layout_regions"].append(_serialize_layout_region(layout_region, region_id=layout_index))
+
+    payload = sanitize_detection_payload(payload, image_shape, logger=logger)
 
     from .canon_state import ensure_canon_state
 
