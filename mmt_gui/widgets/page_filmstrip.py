@@ -34,8 +34,8 @@ from .stage_status import normalize_stage_status, status_gradient_colors
 PAGE_ROLE = int(Qt.ItemDataRole.UserRole) + 1
 STATUS_ROLE = int(Qt.ItemDataRole.UserRole) + 2
 PIXMAP_ROLE = int(Qt.ItemDataRole.UserRole) + 3
-THUMBNAIL_SIZE = QSize(144, 177)
-ITEM_SIZE = QSize(176, 224)
+DEFAULT_THUMBNAIL_SIZE = QSize(144, 177)
+DEFAULT_ITEM_SIZE = QSize(176, 224)
 THUMBNAIL_BATCH_SIZE = 10
 
 
@@ -45,6 +45,12 @@ class _FilmstripDelegate(QStyledItemDelegate):
         self._index_font = QFont()
         self._index_font.setPointSize(9)
         self._index_font.setBold(True)
+        self.thumbnail_size = QSize(DEFAULT_THUMBNAIL_SIZE)
+        self.item_size = QSize(DEFAULT_ITEM_SIZE)
+
+    def set_metrics(self, thumbnail_size: QSize, item_size: QSize) -> None:
+        self.thumbnail_size = QSize(thumbnail_size)
+        self.item_size = QSize(item_size)
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem, index) -> None:  # type: ignore[override]
         painter.save()
@@ -172,7 +178,7 @@ class _FilmstripDelegate(QStyledItemDelegate):
 
     def sizeHint(self, option: QStyleOptionViewItem, index) -> QSize:  # type: ignore[override]
         del option, index
-        return ITEM_SIZE
+        return self.item_size
 
 
 class _FilmstripListWidget(QListWidget):
@@ -194,9 +200,29 @@ class _FilmstripListWidget(QListWidget):
         self.setHorizontalScrollMode(QAbstractItemView.ScrollMode.ScrollPerPixel)
         self.setMouseTracking(True)
         self.setSpacing(4)
-        self.setGridSize(ITEM_SIZE + QSize(16, 10))
-        self.setItemDelegate(_FilmstripDelegate(self))
+        self._delegate = _FilmstripDelegate(self)
+        self.setGridSize(DEFAULT_ITEM_SIZE + QSize(16, 10))
+        self.setItemDelegate(self._delegate)
         self.currentRowChanged.connect(self._emit_page_selected)
+
+    def set_metrics(self, thumbnail_size: QSize, item_size: QSize) -> None:
+        self._delegate.set_metrics(thumbnail_size, item_size)
+        self.setGridSize(item_size + QSize(16, 10))
+
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        hbar = self.horizontalScrollBar()
+        pixel_delta = event.pixelDelta()
+        angle_delta = event.angleDelta()
+
+        delta = 0
+        if not pixel_delta.isNull():
+            delta = pixel_delta.x() if pixel_delta.x() else pixel_delta.y()
+        elif not angle_delta.isNull():
+            delta = angle_delta.x() if angle_delta.x() else angle_delta.y()
+
+        if delta:
+            hbar.setValue(hbar.value() - delta)
+        event.accept()
 
     def _emit_page_selected(self, row: int) -> None:
         if row >= 0:
@@ -224,7 +250,7 @@ class PageFilmstripWidget(QFrame):
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.setObjectName("PageFilmstrip")
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
         self._project_root: Path | None = None
         self._thumbnail_cache: dict[str, tuple[float | None, QPixmap]] = {}
         self._page_rows: dict[str, int] = {}
@@ -235,18 +261,22 @@ class PageFilmstripWidget(QFrame):
         self._thumbnail_timer.setInterval(0)
         self._thumbnail_timer.timeout.connect(self._load_thumbnail_batch)
         self._reorder_enabled = True
+        self._thumbnail_size = QSize(DEFAULT_THUMBNAIL_SIZE)
+        self._item_size = QSize(DEFAULT_ITEM_SIZE)
 
-        self.setMinimumHeight(240)
-        self.setMaximumHeight(300)
+        self.setMinimumHeight(96)
+        self.setMaximumHeight(16777215)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(0)
 
         self.list_widget = _FilmstripListWidget(self)
+        self.list_widget.set_metrics(self._thumbnail_size, self._item_size)
         self.list_widget.page_selected.connect(self.page_selected.emit)
         self.list_widget.page_order_changed.connect(self.page_order_changed.emit)
         layout.addWidget(self.list_widget)
+        self._apply_dynamic_metrics(force=True)
 
     def set_pages(
         self,
@@ -270,7 +300,7 @@ class PageFilmstripWidget(QFrame):
                 item_status = normalize_stage_status((status_map or {}).get(page_relative_path, "missing"))
                 item.setData(STATUS_ROLE, item_status)
                 item.setToolTip(self._thumbnail_tooltip(page_relative_path, item_status))
-                item.setSizeHint(ITEM_SIZE)
+                item.setSizeHint(self._item_size)
                 item.setFlags(
                     Qt.ItemFlag.ItemIsEnabled
                     | Qt.ItemFlag.ItemIsSelectable
@@ -336,6 +366,10 @@ class PageFilmstripWidget(QFrame):
         self._queue_thumbnail_paths(self._thumbnail_load_order(page_paths, self.current_row()))
         self.list_widget.viewport().update()
 
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        super().resizeEvent(event)
+        self._apply_dynamic_metrics()
+
     def set_reorder_enabled(self, enabled: bool) -> None:
         self._reorder_enabled = bool(enabled)
         self.list_widget.setDragDropMode(
@@ -374,7 +408,7 @@ class PageFilmstripWidget(QFrame):
             return None
 
         image_path = self._project_root / page_relative_path
-        cache_key = image_path.as_posix()
+        cache_key = self._thumbnail_cache_key(image_path)
         if not image_path.exists():
             self._thumbnail_cache.pop(cache_key, None)
             return None
@@ -395,7 +429,7 @@ class PageFilmstripWidget(QFrame):
             return self._placeholder_thumbnail("No Project")
 
         image_path = self._project_root / page_relative_path
-        cache_key = image_path.as_posix()
+        cache_key = self._thumbnail_cache_key(image_path)
         if not image_path.exists():
             self._thumbnail_cache.pop(cache_key, None)
             self._emit_thumbnail_warning_once(
@@ -418,13 +452,13 @@ class PageFilmstripWidget(QFrame):
             image_size = reader.size()
             if image_size.isValid() and image_size.width() > 0 and image_size.height() > 0:
                 scaled_size = QSize(
-                    max(16, int(image_size.width() * (THUMBNAIL_SIZE.height() / max(image_size.height(), 1)))),
-                    THUMBNAIL_SIZE.height(),
+                    max(16, int(image_size.width() * (self._thumbnail_size.height() / max(image_size.height(), 1)))),
+                    self._thumbnail_size.height(),
                 )
-                if scaled_size.width() > THUMBNAIL_SIZE.width():
+                if scaled_size.width() > self._thumbnail_size.width():
                     scaled_size = QSize(
-                        THUMBNAIL_SIZE.width(),
-                        max(16, int(image_size.height() * (THUMBNAIL_SIZE.width() / max(image_size.width(), 1)))),
+                        self._thumbnail_size.width(),
+                        max(16, int(image_size.height() * (self._thumbnail_size.width() / max(image_size.width(), 1)))),
                     )
                 reader.setScaledSize(scaled_size)
             image = reader.read()
@@ -501,7 +535,7 @@ class PageFilmstripWidget(QFrame):
             self._thumbnail_timer.stop()
 
     def _placeholder_thumbnail(self, text: str) -> QPixmap:
-        pixmap = QPixmap(THUMBNAIL_SIZE)
+        pixmap = QPixmap(self._thumbnail_size)
         pixmap.fill(Qt.GlobalColor.transparent)
 
         painter = QPainter(pixmap)
@@ -551,6 +585,44 @@ class PageFilmstripWidget(QFrame):
             return
         self._thumbnail_warning_tokens.add(token)
         self.thumbnail_load_failed.emit(message)
+
+    def _thumbnail_cache_key(self, image_path: Path) -> str:
+        return f"{image_path.as_posix()}::{self._thumbnail_size.width()}x{self._thumbnail_size.height()}"
+
+    def _compute_metrics_for_height(self, height: int) -> tuple[QSize, QSize]:
+        margins = self.layout().contentsMargins() if self.layout() is not None else QMargins()
+        available_height = max(80, height - margins.top() - margins.bottom())
+        item_height = max(92, min(360, available_height - 8))
+        item_width = max(84, min(280, int(item_height * 0.78)))
+        thumbnail_height = max(48, item_height - 46)
+        thumbnail_width = max(48, item_width - 28)
+        return QSize(thumbnail_width, thumbnail_height), QSize(item_width, item_height)
+
+    def _apply_dynamic_metrics(self, *, force: bool = False) -> None:
+        thumbnail_size, item_size = self._compute_metrics_for_height(self.height())
+        if not force and thumbnail_size == self._thumbnail_size and item_size == self._item_size:
+            return
+
+        old_thumbnail_size = QSize(self._thumbnail_size)
+        self._thumbnail_size = thumbnail_size
+        self._item_size = item_size
+        self.list_widget.set_metrics(self._thumbnail_size, self._item_size)
+
+        significant_change = (
+            abs(old_thumbnail_size.width() - self._thumbnail_size.width()) >= 16
+            or abs(old_thumbnail_size.height() - self._thumbnail_size.height()) >= 16
+        )
+
+        for row in range(self.list_widget.count()):
+            item = self.list_widget.item(row)
+            if item is not None:
+                item.setSizeHint(self._item_size)
+
+        if significant_change:
+            self._thumbnail_cache.clear()
+            self.refresh_thumbnails()
+        else:
+            self.list_widget.viewport().update()
 
 
 __all__ = ["PageFilmstripWidget"]

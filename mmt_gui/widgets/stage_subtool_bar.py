@@ -27,6 +27,11 @@ class StageToolGroup:
     items: Sequence[StageToolButton]
 
 
+class _NoWheelScrollArea(QScrollArea):
+    def wheelEvent(self, event) -> None:  # type: ignore[override]
+        event.accept()
+
+
 class StageSubToolBar(QFrame):
     """Compact horizontal action strip shown below the workflow stage tabs."""
 
@@ -43,7 +48,7 @@ class StageSubToolBar(QFrame):
         root_layout.setContentsMargins(10, 8, 10, 8)
         root_layout.setSpacing(0)
 
-        self.scroll_area = QScrollArea(self)
+        self.scroll_area = _NoWheelScrollArea(self)
         self.scroll_area.setFrameShape(QFrame.Shape.NoFrame)
         self.scroll_area.setWidgetResizable(True)
         self.scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
