@@ -16,6 +16,7 @@ QMainWindow {
 
 QFrame#AppHeader,
 QFrame#PreviewToolbar,
+QFrame#StageSubToolBar,
 QFrame#WorkflowSidebar,
 QFrame#WorkflowTabs,
 QFrame#LeftToolBar,
@@ -35,6 +36,42 @@ QFrame#WorkflowSidebar {
 QFrame#WorkflowTabs {
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0a0a0c, stop:0.5 #100b1a, stop:1 #1a0b2e);
     border-radius: 0px;
+}
+
+QFrame#StageSubToolBar {
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #111116, stop:0.55 #120d1d, stop:1 #181820);
+    border-radius: 0px;
+    border-top: none;
+}
+
+QFrame#StageSubToolGroup {
+    background: transparent;
+    border: none;
+    border-radius: 0px;
+}
+
+QLabel[stageSubtoolStageTitle="true"] {
+    color: #8a8a9e;
+    font-family: "Orbitron", "Rajdhani", "Segoe UI", sans-serif;
+    font-size: 9pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+}
+
+QLabel[stageSubtoolGroupTitle="true"] {
+    color: #cbd5e1;
+    font-family: "Orbitron", "Rajdhani", "Segoe UI", sans-serif;
+    font-size: 8.5pt;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+
+QFrame#StageSubToolSeparator {
+    background: #2c2c36;
+    border: none;
+    min-width: 1px;
+    max-width: 1px;
 }
 
 QFrame#LeftToolBar {

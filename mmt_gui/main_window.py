@@ -106,7 +106,19 @@ from .window_layout import (
     WINDOW_LAYOUT_VERSION,
     clamp_window_geometry,
 )
-from .widgets import AppHeader, ImagePreviewWidget, LeftToolBar, LogPanel, PageFilmstripWidget, StartupOverlay, WorkflowTabs
+from .widgets import (
+    STAGE_ORDER,
+    AppHeader,
+    ImagePreviewWidget,
+    LeftToolBar,
+    LogPanel,
+    PageFilmstripWidget,
+    StageSubToolBar,
+    StageToolButton,
+    StageToolGroup,
+    StartupOverlay,
+    WorkflowTabs,
+)
 from .workers import (
     DetectionTask,
     DetectionWorkerResult,
@@ -179,6 +191,8 @@ class MainWindow(QMainWindow):
 
         self.current_project: MangaProject | None = None
         self.current_stage_key = "project"
+        self._stage_display_names = {stage_key: stage_label for stage_key, stage_label, _icon in STAGE_ORDER}
+        self._stage_subtool_groups: dict[str, list[StageToolGroup]] = {}
         self._process_stage_status = "missing"
         self._process_active_stage_key: str | None = None
         self._process_restore_page_relative_path: str | None = None
@@ -299,6 +313,7 @@ class MainWindow(QMainWindow):
 
         self.workflow_tabs = WorkflowTabs()
         self.workflow_tabs.stage_selected.connect(self._on_stage_selected)
+        self.stage_subtool_bar = StageSubToolBar()
 
         self.left_toolbar = LeftToolBar()
         self.left_toolbar.preview_mode_changed.connect(lambda _mode: self._refresh_preview_for_current_page())
@@ -363,6 +378,7 @@ class MainWindow(QMainWindow):
         for stage_key, panel in self.stage_panels.items():
             self.stage_indices[stage_key] = self.stage_stack.addWidget(panel)
 
+        self._configure_stage_subtool_bar()
         self._connect_panel_signals()
         self.ocr_panel.set_server_values(self.llama_server_manager)
 
@@ -417,6 +433,7 @@ class MainWindow(QMainWindow):
         self._workspace_splitter.setSizes(list(DEFAULT_WORKSPACE_SPLITTER_SIZES))
         root_layout.addWidget(self.header)
         root_layout.addWidget(self.workflow_tabs)
+        root_layout.addWidget(self.stage_subtool_bar)
         root_layout.addWidget(self._workspace_splitter, 1)
         self.setCentralWidget(root_widget)
         self.startup_overlay = StartupOverlay(root_widget)
@@ -464,6 +481,184 @@ class MainWindow(QMainWindow):
 
         self.open_crash_logs_action = help_menu.addAction("Open Crash Logs Folder")
         self.open_crash_logs_action.triggered.connect(self.open_crash_logs_folder)
+
+    @staticmethod
+    def _stage_tool_button(button: Any, label: str | None = None) -> StageToolButton:
+        return StageToolButton(button=button, label=label)
+
+    def _configure_stage_subtool_bar(self) -> None:
+        self._stage_subtool_groups = {
+            "process": [
+                StageToolGroup(
+                    "Normal",
+                    [
+                        self._stage_tool_button(self.process_panel.process_current_button),
+                        self._stage_tool_button(self.process_panel.process_chapter_button),
+                    ],
+                ),
+                StageToolGroup(
+                    "Re-run / Force",
+                    [
+                        self._stage_tool_button(self.process_panel.reprocess_current_button),
+                        self._stage_tool_button(self.process_panel.reprocess_chapter_button),
+                    ],
+                ),
+                StageToolGroup("Control", [self._stage_tool_button(self.process_panel.stop_process_button)]),
+            ],
+            "project": [
+                StageToolGroup(
+                    "Project",
+                    [
+                        self._stage_tool_button(self.project_panel.new_project_button),
+                        self._stage_tool_button(self.project_panel.open_project_button),
+                        self._stage_tool_button(self.project_panel.save_project_button),
+                        self._stage_tool_button(self.project_panel.import_images_button),
+                    ],
+                ),
+                StageToolGroup(
+                    "Danger",
+                    [self._stage_tool_button(self.project_panel.remove_current_page_button)],
+                ),
+            ],
+            "config": [],
+            "detection": [
+                StageToolGroup(
+                    "Normal",
+                    [
+                        self._stage_tool_button(self.detection_panel.run_selected_button, "Detect Page"),
+                        self._stage_tool_button(self.detection_panel.run_all_button, "Detect All"),
+                        self._stage_tool_button(self.detection_panel.reload_button),
+                    ],
+                ),
+                StageToolGroup(
+                    "Preview",
+                    [self._stage_tool_button(self.detection_panel.clear_overlay_button)],
+                ),
+                StageToolGroup(
+                    "Re-run / Force",
+                    [
+                        self._stage_tool_button(self.detection_panel.rerun_selected_button, "Re-detect Page"),
+                        self._stage_tool_button(self.detection_panel.rerun_all_button, "Re-detect All"),
+                    ],
+                ),
+            ],
+            "ocr": [
+                StageToolGroup(
+                    "Normal",
+                    [
+                        self._stage_tool_button(self.ocr_panel.prepare_selected_button),
+                        self._stage_tool_button(self.ocr_panel.prepare_all_button),
+                        self._stage_tool_button(self.ocr_panel.run_selected_button),
+                        self._stage_tool_button(self.ocr_panel.run_all_button),
+                        self._stage_tool_button(self.ocr_panel.run_selected_items_button),
+                        self._stage_tool_button(self.ocr_panel.save_text_button),
+                        self._stage_tool_button(self.ocr_panel.reload_button),
+                    ],
+                ),
+                StageToolGroup(
+                    "Re-run / Force",
+                    [
+                        self._stage_tool_button(self.ocr_panel.reprepare_selected_button),
+                        self._stage_tool_button(self.ocr_panel.reprepare_all_button),
+                        self._stage_tool_button(self.ocr_panel.rerun_selected_button),
+                        self._stage_tool_button(self.ocr_panel.rerun_all_button),
+                        self._stage_tool_button(self.ocr_panel.rerun_selected_items_button),
+                    ],
+                ),
+            ],
+            "translation": [
+                StageToolGroup(
+                    "Normal",
+                    [
+                        self._stage_tool_button(self.translation_panel.initialize_selected_button),
+                        self._stage_tool_button(self.translation_panel.initialize_all_button),
+                        self._stage_tool_button(self.translation_panel.run_selected_button),
+                        self._stage_tool_button(self.translation_panel.run_all_button),
+                        self._stage_tool_button(self.translation_panel.run_selected_items_button),
+                        self._stage_tool_button(self.translation_panel.save_text_button, "Save Text"),
+                        self._stage_tool_button(self.translation_panel.reload_button),
+                    ],
+                ),
+                StageToolGroup(
+                    "Re-run / Force",
+                    [
+                        self._stage_tool_button(self.translation_panel.reinitialize_selected_button),
+                        self._stage_tool_button(self.translation_panel.reinitialize_all_button),
+                        self._stage_tool_button(self.translation_panel.rerun_selected_button),
+                        self._stage_tool_button(self.translation_panel.rerun_all_button),
+                        self._stage_tool_button(self.translation_panel.rerun_selected_items_button),
+                    ],
+                ),
+            ],
+            "inpaint": [
+                StageToolGroup(
+                    "Normal",
+                    [
+                        self._stage_tool_button(self.inpaint_panel.prepare_selected_button),
+                        self._stage_tool_button(self.inpaint_panel.prepare_all_button, "Prepare Mask All"),
+                        self._stage_tool_button(self.inpaint_panel.run_selected_button),
+                        self._stage_tool_button(self.inpaint_panel.run_all_button),
+                        self._stage_tool_button(self.inpaint_panel.reload_button),
+                    ],
+                ),
+                StageToolGroup(
+                    "Preview",
+                    [self._stage_tool_button(self.inpaint_panel.clear_preview_button, "Clear Preview")],
+                ),
+                StageToolGroup(
+                    "Re-run / Force",
+                    [
+                        self._stage_tool_button(self.inpaint_panel.reprepare_selected_button),
+                        self._stage_tool_button(self.inpaint_panel.reprepare_all_button, "Re-prepare Mask All"),
+                        self._stage_tool_button(self.inpaint_panel.rerun_selected_button),
+                        self._stage_tool_button(self.inpaint_panel.rerun_all_button),
+                    ],
+                ),
+            ],
+            "render": [
+                StageToolGroup(
+                    "Normal",
+                    [
+                        self._stage_tool_button(self.render_panel.prepare_selected_button, "Prepare Render"),
+                        self._stage_tool_button(self.render_panel.prepare_all_button, "Prepare Render All"),
+                        self._stage_tool_button(self.render_panel.run_selected_button),
+                        self._stage_tool_button(self.render_panel.run_all_button),
+                        self._stage_tool_button(self.render_panel.reload_button),
+                    ],
+                ),
+                StageToolGroup(
+                    "Preview",
+                    [self._stage_tool_button(self.render_panel.clear_preview_button, "Clear Preview")],
+                ),
+                StageToolGroup(
+                    "Re-run / Force",
+                    [
+                        self._stage_tool_button(self.render_panel.reprepare_selected_button, "Re-prepare Render"),
+                        self._stage_tool_button(self.render_panel.reprepare_all_button, "Re-prepare Render All"),
+                        self._stage_tool_button(self.render_panel.rerun_selected_button),
+                        self._stage_tool_button(self.render_panel.rerun_all_button),
+                    ],
+                ),
+            ],
+            "export": [],
+        }
+
+        for panel in (
+            self.process_panel,
+            self.project_panel,
+            self.detection_panel,
+            self.ocr_panel,
+            self.translation_panel,
+            self.inpaint_panel,
+            self.render_panel,
+        ):
+            panel.detach_widget(getattr(panel, "actions_section", None))
+
+    def _update_stage_subtool_bar(self, stage_key: str) -> None:
+        self.stage_subtool_bar.set_stage_groups(
+            self._stage_display_names.get(stage_key, stage_key.title()),
+            self._stage_subtool_groups.get(stage_key, []),
+        )
 
     def _connect_panel_signals(self) -> None:
         self.project_panel.new_project_requested.connect(self.new_project)
@@ -1007,6 +1202,7 @@ class MainWindow(QMainWindow):
         self.current_stage_key = stage_key
         self.workflow_tabs.set_current_stage(stage_key)
         self.stage_stack.setCurrentIndex(self.stage_indices[stage_key])
+        self._update_stage_subtool_bar(stage_key)
         self.left_toolbar.set_modes(
             GLOBAL_PREVIEW_MODES,
             self.left_toolbar.current_mode(),

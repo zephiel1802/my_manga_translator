@@ -38,6 +38,7 @@ class ProcessPanel(StagePanel):
         self._step_labels: dict[str, StatusLabel] = {}
 
         actions_card = CollapsibleSection("One-click Process", expanded=True)
+        self.actions_section = actions_card
         actions_layout = QGridLayout()
         actions_layout.setContentsMargins(0, 0, 0, 0)
         actions_layout.setHorizontalSpacing(8)

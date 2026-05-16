@@ -18,11 +18,9 @@ from PyQt6.QtGui import (
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QFrame,
-    QHBoxLayout,
     QListView,
     QListWidget,
     QListWidgetItem,
-    QLabel,
     QSizePolicy,
     QStyle,
     QStyledItemDelegate,
@@ -243,22 +241,7 @@ class PageFilmstripWidget(QFrame):
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
-
-        header_layout = QHBoxLayout()
-        header_layout.setContentsMargins(0, 0, 0, 0)
-        header_layout.setSpacing(6)
-
-        title_label = QLabel("Pages", self)
-        title_label.setProperty("role", "sectionTitle")
-        header_layout.addWidget(title_label)
-
-        self.subtitle_label = QLabel("Filmstrip", self)
-        self.subtitle_label.setProperty("role", "muted")
-        header_layout.addWidget(self.subtitle_label)
-        header_layout.addStretch(1)
-
-        layout.addLayout(header_layout)
+        layout.setSpacing(0)
 
         self.list_widget = _FilmstripListWidget(self)
         self.list_widget.page_selected.connect(self.page_selected.emit)
@@ -300,9 +283,6 @@ class PageFilmstripWidget(QFrame):
         finally:
             self.list_widget.blockSignals(False)
 
-        self.subtitle_label.setText(
-            "Filmstrip" if not page_relative_paths else f"Filmstrip - {len(page_relative_paths)} page(s)"
-        )
         self.set_reorder_enabled(self._reorder_enabled)
 
         if not page_relative_paths:

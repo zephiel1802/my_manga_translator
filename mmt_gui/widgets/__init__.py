@@ -13,6 +13,7 @@ from .page_filmstrip import PageFilmstripWidget
 from .preview_toolbar import PreviewToolbar
 from .settings_card import SettingsCard, style_button
 from .startup_overlay import StartupOverlay
+from .stage_subtool_bar import StageSubToolBar, StageToolButton, StageToolGroup
 from .stage_status import StageStatusDot, StageStatusLine, StatusLabel
 from .text_item_editor import TextItemEditorWidget
 from .workflow_tabs import STAGE_ORDER, WorkflowTabs
@@ -33,6 +34,9 @@ __all__ = [
     "StaticSection",
     "StageStatusDot",
     "StageStatusLine",
+    "StageSubToolBar",
+    "StageToolButton",
+    "StageToolGroup",
     "StatusLabel",
     "STAGE_ORDER",
     "TextItemEditorWidget",

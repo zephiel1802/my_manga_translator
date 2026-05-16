@@ -25,6 +25,7 @@ class ProjectPanel(StagePanel):
         super().__init__("Project", parent)
 
         actions_card = CollapsibleSection("Project Actions", expanded=True)
+        self.actions_section = actions_card
         self.new_project_button = QPushButton("New Project")
         style_button(self.new_project_button, "primary")
         self.new_project_button.clicked.connect(self.new_project_requested.emit)
