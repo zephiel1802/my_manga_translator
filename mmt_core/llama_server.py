@@ -140,6 +140,8 @@ class LlamaServerManager:
             str(self.ctx_size),
             "-ngl",
             str(self.gpu_layers),
+            "--temp",
+            "0",
         ]
 
     def check_server(self, *, timeout: float = 3.0) -> LlamaServerStatus:

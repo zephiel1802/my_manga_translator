@@ -6,10 +6,15 @@ import base64
 from pathlib import Path
 from typing import Any
 
-from ocr.paddleocr_vl_ocr import clean_paddleocr_vl_output
+from ocr.paddleocr_vl_ocr import (
+    clean_paddleocr_vl_output,
+    is_degenerate_ocr_output,
+    trim_repeated_ocr_output,
+)
 
 
 DEFAULT_PROMPT = "OCR:"
+DEFAULT_MAX_RETRIES = 3
 
 
 class PaddleOCRVLClientError(RuntimeError):
@@ -29,6 +34,7 @@ class PaddleOCRVLClient:
         temperature: float = 0.0,
         repeat_penalty: float = 1.2,
         repeat_last_n: int = -1,
+        max_retries: int = DEFAULT_MAX_RETRIES,
     ) -> None:
         normalized_url = str(server_url or "").strip().rstrip("/")
         if not normalized_url:
@@ -38,9 +44,10 @@ class PaddleOCRVLClient:
         self.timeout = float(timeout)
         self.prompt = str(prompt or DEFAULT_PROMPT).strip() or DEFAULT_PROMPT
         self.max_tokens = int(max_tokens)
-        self.temperature = float(temperature)
+        self.temperature = 0.0
         self.repeat_penalty = float(repeat_penalty)
         self.repeat_last_n = int(repeat_last_n)
+        self.max_retries = max(1, int(max_retries))
 
     def check_server(self) -> str:
         """Verify that the server exposes a health or models endpoint."""
@@ -82,15 +89,46 @@ class PaddleOCRVLClient:
             raise FileNotFoundError(f"OCR crop file is missing: {image_file}")
 
         image_b64 = base64.b64encode(image_file.read_bytes()).decode("ascii")
-        return self._chat_completion(image_b64)
+        return self._recognize_with_retries(image_b64)
 
-    def _chat_completion(self, image_b64: str) -> str:
+    def _recognize_with_retries(self, image_b64: str) -> str:
+        best_trimmed_candidate = ""
+        best_fallback_candidate = ""
+
+        for attempt in range(1, self.max_retries + 1):
+            request_max_tokens = (
+                self.max_tokens
+                if attempt == 1
+                else min(self.max_tokens, 128)
+            )
+
+            raw_text = self._chat_completion(image_b64, max_tokens=request_max_tokens)
+            cleaned = clean_paddleocr_vl_output(raw_text)
+            trimmed, had_repeat = trim_repeated_ocr_output(cleaned)
+            degenerate = is_degenerate_ocr_output(cleaned)
+
+            if cleaned:
+                best_fallback_candidate = _prefer_candidate(best_fallback_candidate, cleaned)
+            if had_repeat and trimmed:
+                best_trimmed_candidate = _prefer_candidate(best_trimmed_candidate, trimmed)
+
+            if cleaned and not had_repeat and not degenerate:
+                return cleaned
+
+        if best_trimmed_candidate:
+            return best_trimmed_candidate
+        if best_fallback_candidate:
+            return best_fallback_candidate
+        return ""
+
+    def _chat_completion(self, image_b64: str, *, max_tokens: int | None = None) -> str:
         requests = self._requests_module()
         request_error = self._request_exception_class(requests)
+        token_limit = int(max_tokens if max_tokens is not None else self.max_tokens)
         payload = {
             "model": "paddleocr-vl",
-            "temperature": self.temperature,
-            "max_tokens": self.max_tokens,
+            "temperature": 0.0,
+            "max_tokens": token_limit,
             "repeat_penalty": self.repeat_penalty,
             "repeat_last_n": self.repeat_last_n,
             "repetition_penalty": self.repeat_penalty,
@@ -126,7 +164,7 @@ class PaddleOCRVLClient:
             ) from exc
 
         if int(response.status_code) == 404:
-            return self._legacy_completion(image_b64)
+            return self._legacy_completion(image_b64, max_tokens=token_limit)
 
         if int(response.status_code) >= 400:
             raise PaddleOCRVLClientError(
@@ -143,14 +181,15 @@ class PaddleOCRVLClient:
 
         return self._extract_chat_text(response_data)
 
-    def _legacy_completion(self, image_b64: str) -> str:
+    def _legacy_completion(self, image_b64: str, *, max_tokens: int | None = None) -> str:
         requests = self._requests_module()
         request_error = self._request_exception_class(requests)
+        token_limit = int(max_tokens if max_tokens is not None else self.max_tokens)
         payload = {
             "prompt": self.prompt,
             "image_data": image_b64,
-            "n_predict": self.max_tokens,
-            "temperature": self.temperature,
+            "n_predict": token_limit,
+            "temperature": 0.0,
             "repeat_penalty": self.repeat_penalty,
             "repeat_last_n": self.repeat_last_n,
         }
@@ -243,7 +282,21 @@ class PaddleOCRVLClient:
         return text[:400] or "(empty response body)"
 
 
+def _candidate_score(text: str) -> tuple[int, int]:
+    compact = "".join(char for char in str(text or "") if not char.isspace())
+    return (len(compact), len(set(compact)))
+
+
+def _prefer_candidate(current: str, candidate: str) -> str:
+    if not candidate:
+        return current
+    if not current:
+        return candidate
+    return candidate if _candidate_score(candidate) > _candidate_score(current) else current
+
+
 __all__ = [
+    "DEFAULT_MAX_RETRIES",
     "DEFAULT_PROMPT",
     "PaddleOCRVLClient",
     "PaddleOCRVLClientError",
