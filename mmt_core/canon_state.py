@@ -1560,6 +1560,8 @@ def _derive_text_mask_bboxes_for_item(
     layout_regions_by_id: dict[int, dict[str, Any]],
     text_regions_by_bubble_id: dict[int, list[dict[str, Any]]],
 ) -> list[list[int]]:
+    kind = normalize_canon_kind(item.get("kind"))
+    bbox = _sanitize_bbox(item.get("bbox"), image_width=image_width, image_height=image_height)
     metadata = item.get("metadata", {})
     if not isinstance(metadata, dict):
         metadata = {}
@@ -1571,9 +1573,15 @@ def _derive_text_mask_bboxes_for_item(
             image_height=image_height,
         )
         if legacy_boxes:
+            if kind == "bubble" and bbox is not None:
+                return _clip_bbox_list_to_bbox(
+                    legacy_boxes,
+                    clip_bbox=bbox,
+                    image_width=image_width,
+                    image_height=image_height,
+                )
             return legacy_boxes
 
-    kind = normalize_canon_kind(item.get("kind"))
     detector_refs = item.get("detector_refs", {})
     if not isinstance(detector_refs, dict):
         detector_refs = {}
@@ -1586,15 +1594,27 @@ def _derive_text_mask_bboxes_for_item(
         matched_regions = [text_regions_by_id[region_id] for region_id in text_region_ids if region_id in text_regions_by_id]
         if not matched_regions and bubble_id is not None:
             matched_regions = list(text_regions_by_bubble_id.get(bubble_id, []))
-        matched_boxes = _bboxes_from_detection_regions(
-            matched_regions,
-            image_width=image_width,
-            image_height=image_height,
-        )
+        filtered_regions = []
+        bubble_bbox_tuple = tuple(bbox) if bbox is not None else None
+        for region in matched_regions:
+            if bubble_bbox_tuple is None:
+                break
+            text_bbox = _ocr_items_clamp_bbox_to_image(region.get("bbox"), (image_height, image_width, 3))
+            if text_bbox is None:
+                continue
+            if text_region_belongs_to_bubble(text_bbox, bubble_bbox_tuple):
+                filtered_regions.append(region)
+        matched_boxes = []
+        if bbox is not None:
+            matched_boxes = _clipped_bboxes_from_detection_regions(
+                filtered_regions,
+                clip_bbox=bbox,
+                image_width=image_width,
+                image_height=image_height,
+            )
         if matched_boxes:
             return matched_boxes
 
-        bbox = _sanitize_bbox(item.get("bbox"), image_width=image_width, image_height=image_height)
         ocr_bbox = _sanitize_bbox(item.get("ocr_bbox"), image_width=image_width, image_height=image_height)
         if (
             not bool(item.get("manual", False))
@@ -1622,7 +1642,6 @@ def _derive_text_mask_bboxes_for_item(
         if matched_boxes:
             return matched_boxes
 
-    bbox = _sanitize_bbox(item.get("bbox"), image_width=image_width, image_height=image_height)
     if bbox is not None:
         return [list(bbox)]
 
@@ -1679,6 +1698,31 @@ def _clipped_bboxes_from_detection_regions(
         seen.add(bbox_key)
         boxes.append(list(clipped_bbox))
     return boxes
+
+
+def _clip_bbox_list_to_bbox(
+    boxes: Sequence[list[int]],
+    *,
+    clip_bbox: list[int],
+    image_width: int,
+    image_height: int,
+) -> list[list[int]]:
+    clipped_boxes: list[list[int]] = []
+    seen: set[tuple[int, int, int, int]] = set()
+    clip_box_tuple = tuple(clip_bbox)
+    for box in boxes:
+        sanitized_box = _sanitize_bbox(box, image_width=image_width, image_height=image_height)
+        if sanitized_box is None:
+            continue
+        clipped_bbox = intersect_bboxes(tuple(sanitized_box), clip_box_tuple, (image_height, image_width, 3))
+        if clipped_bbox is None:
+            continue
+        bbox_key = tuple(clipped_bbox)
+        if bbox_key in seen:
+            continue
+        seen.add(bbox_key)
+        clipped_boxes.append(list(clipped_bbox))
+    return clipped_boxes
 
 
 def _sanitize_bbox_list(

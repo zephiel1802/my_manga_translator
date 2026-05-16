@@ -2397,13 +2397,14 @@ class MainWindow(QMainWindow):
                 self.log(f"Failed to load editable OCR boxes from {cache_path}: {exc}")
             return False
 
-        self.current_ocr_data = ocr_data
+        self.current_ocr_data = dict(ocr_data)
+        self.current_ocr_data["items"] = [dict(item) for item in self._ocr_edit_items]
         self.current_ocr_cache_path = cache_path
-        self.ocr_panel.set_items(ocr_data.get("items", []), cache_path)
+        self.ocr_panel.set_items(self.current_ocr_data.get("items", []), cache_path)
         self.ocr_panel.set_box_edit_mode_checked(True)
         self.ocr_panel.set_box_dirty(False)
         self.ocr_panel.set_selected_box(None)
-        self._update_ocr_box_stale_warning(ocr_data)
+        self._update_ocr_box_stale_warning(self.current_ocr_data)
         self._apply_ocr_edit_session_to_preview(preserve_dirty=False)
         self._refresh_preview_for_current_page()
         return True
@@ -2445,14 +2446,15 @@ class MainWindow(QMainWindow):
             self.show_error("Failed to save OCR box edits", str(exc))
             return
 
-        self.current_ocr_data = ocr_data
+        self.current_ocr_data = dict(ocr_data)
+        self.current_ocr_data["items"] = [dict(item) for item in self._ocr_edit_items]
         self.current_ocr_cache_path = cache_path
-        self.ocr_panel.set_items(ocr_data.get("items", []), cache_path)
-        self.translation_panel.set_ocr_context(self.current_project.root_dir, ocr_data, cache_path)
-        self._update_project_ocr_stage_status(image_relative_path, ocr_data)
+        self.ocr_panel.set_items(self.current_ocr_data.get("items", []), cache_path)
+        self.translation_panel.set_ocr_context(self.current_project.root_dir, self.current_ocr_data, cache_path)
+        self._update_project_ocr_stage_status(image_relative_path, self.current_ocr_data)
         self._mark_ocr_downstream_stale(image_relative_path)
         self._persist_project(show_errors=False)
-        self._update_ocr_box_stale_warning(ocr_data)
+        self._update_ocr_box_stale_warning(self.current_ocr_data)
         self._reload_current_page_cached_views()
         self._apply_ocr_edit_session_to_preview(preserve_dirty=False)
         self._refresh_stage_statuses()
