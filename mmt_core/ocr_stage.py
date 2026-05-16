@@ -10,11 +10,19 @@ from typing import Any
 from .canon_state import canon_item_bbox, ensure_canon_state, get_canon_item, resolve_canon_item_for_stage_item
 from .detection_io import detection_json_path, load_detection_json, save_detection_json
 from .image_io import load_image_bgr, project_relative_path, save_png_image
+from .ocr_image_preprocess import (
+    DEFAULT_IMAGE_PAD,
+    DEFAULT_MAX_LONG_SIDE,
+    DEFAULT_MAX_UPSCALE_FACTOR,
+    DEFAULT_MIN_SHORT_SIDE,
+    save_ocr_provider_image,
+)
 from .ocr_models import DEFAULT_OCR_PROVIDER, OCRConfig
 from .ocr_io import (
     load_ocr_json,
     normalize_ocr_item,
     ocr_crop_dir_for_page,
+    ocr_provider_crop_dir_for_page,
     ocr_json_path,
     save_ocr_items_result,
     save_ocr_payload,
@@ -142,7 +150,9 @@ def run_ocr_for_page(
         raise FileNotFoundError(f"Source image does not exist: {source_image_path}")
     source_image = load_image_bgr(source_image_path)
     crop_dir = ocr_crop_dir_for_page(project, relative_path)
+    provider_crop_dir = ocr_provider_crop_dir_for_page(project, relative_path)
     crop_dir.mkdir(parents=True, exist_ok=True)
+    provider_crop_dir.mkdir(parents=True, exist_ok=True)
 
     config = OCRConfig.from_value(provider_config)
     config.ocr_provider = str(ocr_provider or config.ocr_provider or DEFAULT_OCR_PROVIDER)
@@ -196,6 +206,7 @@ def run_ocr_for_page(
         provider_name = getattr(provider, "provider_label", config.provider_label)
         _log(logger, f"Running OCR for {relative_path.name} with {provider_name}")
         _log(logger, f"Processing {total_items} OCR item(s) for {relative_path.name}")
+        _log(logger, "Provider image preprocess source: old PaddleOCRVLOCR logic")
         _save_ocr_progress(payload, ocr_path)
 
         processed_count = 0
@@ -267,6 +278,28 @@ def run_ocr_for_page(
             crop_path = crop_dir / f"item_{item_id:03d}.png"
             save_png_image(crop_image, crop_path)
             item["crop_path"] = project_relative_path(project.root_dir, crop_path)
+            _log(
+                logger,
+                f"Saved original OCR crop for item {item_id}: {crop_path} "
+                f"({_image_width(crop_image)}x{_image_height(crop_image)})",
+            )
+
+            provider_crop_path = provider_crop_dir / f"item_{item_id:03d}.png"
+            save_ocr_provider_image(crop_image, provider_crop_path)
+            provider_width, provider_height = _png_image_size(provider_crop_path)
+            item["provider_crop_path"] = project_relative_path(project.root_dir, provider_crop_path)
+            item["provider_crop_preprocess"] = {
+                "source": "ocr/paddleocr_vl_ocr.py::_preprocess_ocr_image",
+                "image_pad": DEFAULT_IMAGE_PAD,
+                "min_short_side": DEFAULT_MIN_SHORT_SIDE,
+                "max_long_side": DEFAULT_MAX_LONG_SIDE,
+                "max_upscale_factor": DEFAULT_MAX_UPSCALE_FACTOR,
+            }
+            _log(
+                logger,
+                f"Saved provider OCR crop for item {item_id}: {provider_crop_path} "
+                f"({provider_width}x{provider_height})",
+            )
 
             item["status"] = "running"
             item["error"] = ""
@@ -284,7 +317,7 @@ def run_ocr_for_page(
             )
 
             try:
-                recognized_text = provider.recognize_image(crop_path)
+                recognized_text = provider.recognize_image(provider_crop_path)
             except TimeoutError:
                 item["status"] = "error"
                 item["error"] = _timeout_message(provider, item_id)
@@ -393,6 +426,37 @@ def _safe_int(value: Any) -> int:
         return int(value)
     except Exception:
         return 0
+
+
+def _image_width(image: Any) -> int:
+    shape = getattr(image, "shape", None)
+    if shape is not None and len(shape) >= 2:
+        return int(shape[1])
+    size = getattr(image, "size", None)
+    if isinstance(size, tuple) and len(size) >= 2:
+        return int(size[0])
+    return 0
+
+
+def _image_height(image: Any) -> int:
+    shape = getattr(image, "shape", None)
+    if shape is not None and len(shape) >= 2:
+        return int(shape[0])
+    size = getattr(image, "size", None)
+    if isinstance(size, tuple) and len(size) >= 2:
+        return int(size[1])
+    return 0
+
+
+def _png_image_size(path: Path) -> tuple[int, int]:
+    try:
+        from PIL import Image
+    except Exception as exc:
+        raise RuntimeError("Pillow is required to inspect OCR provider crop size.") from exc
+
+    with Image.open(path) as image:
+        width, height = image.size
+    return int(width), int(height)
 
 
 def _timestamp() -> str:

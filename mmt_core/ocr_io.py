@@ -33,6 +33,13 @@ def ocr_crop_dir_for_page(project: ProjectLike, image_relative_path: Path | str)
     return ensure_path(project.cache_dir) / "ocr_crops" / relative_path.stem
 
 
+def ocr_provider_crop_dir_for_page(project: ProjectLike, image_relative_path: Path | str) -> Path:
+    """Return the canonical provider OCR crop directory for a project page."""
+
+    relative_path = Path(image_relative_path)
+    return ensure_path(project.cache_dir) / "ocr_provider_crops" / relative_path.stem
+
+
 def save_ocr_items_result(
     items: Sequence[dict[str, Any]],
     *,
@@ -134,6 +141,8 @@ def normalize_ocr_item(item: dict[str, Any]) -> dict[str, Any]:
     normalized.setdefault("bbox", None)
     normalized.setdefault("ocr_bbox", None)
     normalized.setdefault("crop_path", None)
+    normalized.setdefault("provider_crop_path", None)
+    normalized.setdefault("provider_crop_preprocess", None)
     normalized.setdefault("bubble_id", None)
     normalized.setdefault("reading_order", None)
     normalized.setdefault("detector_sources", [])
@@ -268,6 +277,7 @@ __all__ = [
     "load_ocr_json",
     "normalize_ocr_item",
     "ocr_crop_dir_for_page",
+    "ocr_provider_crop_dir_for_page",
     "ocr_json_path",
     "save_ocr_payload",
     "save_ocr_items_result",
