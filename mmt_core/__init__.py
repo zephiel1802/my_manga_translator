@@ -47,6 +47,7 @@ from .detection_edit import (
 )
 from .detection_stage import run_detection_for_image
 from .llama_server import LlamaServerManager, LlamaServerStatus
+from .llama_cache import clear_llama_server_slots
 from .inpaint_io import (
     bubble_mask_path,
     inpaint_image_path,
@@ -118,9 +119,13 @@ from .ocr_edit import (
 from .ocr_stage import prepare_ocr_items_for_image, run_ocr_for_page
 from .chrome_lens_client import ChromeLensClient, ChromeLensClientError
 from .render_io import (
+    DEFAULT_RENDER_LINE_SPACING_RATIO,
+    has_active_style_overrides,
     load_render_json,
+    normalize_render_style_overrides,
     render_image_path,
     render_json_path,
+    resolve_render_text,
     render_sprite_dir,
     save_render_json,
     summarize_render_json,
@@ -131,6 +136,7 @@ from .render_edit import (
     restore_render_item,
     save_render_edit_items,
     summarize_render_edit_state,
+    update_render_item_style_overrides,
     update_render_item_bbox,
 )
 from .render_models import RenderConfig
@@ -253,6 +259,7 @@ __all__ = [
     "LANGUAGE_CHOICES",
     "LlamaServerManager",
     "LlamaServerStatus",
+    "clear_llama_server_slots",
     "OPENAI_COMPATIBLE_PRESET_BASE_URLS",
     "OPENAI_COMPATIBLE_PRESET_CHOICES",
     "OPENAI_COMPATIBLE_PRESET_CUSTOM",
@@ -316,10 +323,13 @@ __all__ = [
     "PaddleOCRVLClientError",
     "ChromeLensClient",
     "ChromeLensClientError",
+    "DEFAULT_RENDER_LINE_SPACING_RATIO",
     "RenderConfig",
+    "has_active_style_overrides",
     "render_image_path",
     "render_json_path",
     "render_sprite_dir",
+    "resolve_render_text",
     "resolve_font_path",
     "resolve_prompt_style",
     "list_project_fonts",
@@ -368,6 +378,7 @@ __all__ = [
     "save_detection_edit_items",
     "load_render_json",
     "load_render_edit_items",
+    "normalize_render_style_overrides",
     "exclude_detection_item",
     "exclude_ocr_item",
     "exclude_render_item",
@@ -386,6 +397,7 @@ __all__ = [
     "update_ocr_item_bbox",
     "update_ocr_item_text",
     "update_render_item_bbox",
+    "update_render_item_style_overrides",
     "update_translation_item_source_text",
     "update_translation_item_translated_text",
     "validate_ocr_provider_config",

@@ -62,6 +62,7 @@ from mmt_core import (
     save_detection_edit_items,
     save_ocr_edit_items,
     save_render_edit_items,
+    update_render_item_style_overrides,
     load_translation_json,
     ocr_json_path,
     render_image_path,
@@ -779,6 +780,7 @@ class MainWindow(QMainWindow):
         self.render_panel.rerun_all_requested.connect(lambda: self.run_render_for_all_pages(force=True))
         self.render_panel.reload_requested.connect(self.reload_cached_render)
         self.render_panel.clear_preview_requested.connect(self.clear_render_preview)
+        self.render_panel.save_style_edits_requested.connect(self.save_render_style_edits)
         self.render_panel.box_edit_mode_toggled.connect(self._on_render_box_edit_mode_toggled)
         self.render_panel.save_box_edits_requested.connect(self.save_render_box_edits)
         self.render_panel.cancel_box_edits_requested.connect(self.cancel_render_box_edits)
@@ -2390,6 +2392,8 @@ class MainWindow(QMainWindow):
             return False
         if not self._ensure_pending_render_box_changes_resolved():
             return False
+        if not self._ensure_pending_render_style_changes_resolved():
+            return False
         if self.current_stage_key == "ocr":
             return self.ocr_panel.ensure_pending_changes_resolved(self)
         if self.current_stage_key == "translation":
@@ -2456,6 +2460,27 @@ class MainWindow(QMainWindow):
             return not self.render_panel.has_unsaved_box_edits()
         if box_result == QMessageBox.StandardButton.Discard:
             self.cancel_render_box_edits()
+            return True
+        return False
+
+    def _ensure_pending_render_style_changes_resolved(self) -> bool:
+        if not self.render_panel.has_unsaved_style_edits():
+            return True
+
+        style_result = QMessageBox.question(
+            self,
+            "Unsaved Render Item Style",
+            "Save your render item style edits before continuing?",
+            QMessageBox.StandardButton.Save
+            | QMessageBox.StandardButton.Discard
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Save,
+        )
+        if style_result == QMessageBox.StandardButton.Save:
+            self.save_render_style_edits()
+            return not self.render_panel.has_unsaved_style_edits()
+        if style_result == QMessageBox.StandardButton.Discard:
+            self.render_panel.revert_current_style_editor()
             return True
         return False
 
@@ -2968,7 +2993,7 @@ class MainWindow(QMainWindow):
 
         self.current_render_data = render_data
         self.current_render_cache_path = cache_path
-        self.render_panel.set_data(render_data)
+        self.render_panel.set_data(render_data, preserve_pending_style_edits=False)
         self._update_project_render_stage_status(image_relative_path, render_data)
         self._mark_render_downstream_stale(image_relative_path)
         self._persist_project(show_errors=False)
@@ -2980,6 +3005,45 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage("Render box edits saved. Canon state updated.")
         self.log(f"Saved render box edits for {Path(image_relative_path).name}")
         self.log("Canon state updated. Downstream stages will use the edited boxes.")
+
+    def save_render_style_edits(self) -> None:
+        if self.current_project is None:
+            self.show_error("No project open", "Open a project before saving render item style edits.")
+            return
+        image_relative_path = self.current_page()
+        if not image_relative_path:
+            self.show_error("No page selected", "Select a page before saving render item style edits.")
+            return
+
+        item_id = self.render_panel.current_style_editor_item_id()
+        if item_id is None:
+            self.show_error("No render item selected", "Select a render item before saving its style overrides.")
+            return
+
+        cache_path = render_json_path(self.current_project, image_relative_path)
+        if not cache_path.exists():
+            self.show_error("Render JSON missing", "Prepare or run Render first before editing render item styles.")
+            return
+
+        try:
+            style_overrides = self.render_panel.current_style_overrides()
+            render_data = update_render_item_style_overrides(cache_path, int(item_id), style_overrides)
+        except Exception as exc:
+            self.show_error("Failed to save render item style", str(exc))
+            return
+
+        self.render_panel.clear_pending_style_edit(int(item_id))
+        self.current_render_data = render_data
+        self.current_render_cache_path = cache_path
+        self.render_panel.set_data(render_data)
+        self._update_project_render_stage_status(image_relative_path, render_data)
+        self._mark_render_downstream_stale(image_relative_path)
+        self._persist_project(show_errors=False)
+        self._update_render_box_stale_warning(render_data)
+        self._refresh_stage_statuses()
+        self._refresh_preview_for_current_page()
+        self.statusBar().showMessage("Render item style saved. Re-render is recommended.")
+        self.log(f"Saved render item style overrides for {Path(image_relative_path).name} item {item_id}.")
 
     def cancel_render_box_edits(self) -> None:
         if self.current_project is None or not self.render_panel.box_edit_mode_enabled():
@@ -3020,7 +3084,7 @@ class MainWindow(QMainWindow):
             self.render_panel.set_box_warning(None)
             return
         if bool(render_data.get("needs_render", False)):
-            self.render_panel.set_box_warning("Render boxes changed. Re-render is recommended.")
+            self.render_panel.set_box_warning("Render edits changed. Re-render is recommended.")
         else:
             self.render_panel.set_box_warning(None)
 
@@ -4820,6 +4884,10 @@ class MainWindow(QMainWindow):
             self._follow_batch_paused = True
             self.log("Follow batch progress paused because the Render box editor has unsaved changes.")
             return
+        if self.render_panel.has_unsaved_style_edits():
+            self._follow_batch_paused = True
+            self.log("Follow batch progress paused because the Render item editor has unsaved changes.")
+            return
         for index in range(self.current_project.page_count):
             if self.current_project.page_relative_path_for_index(index) == image_relative_path:
                 self._select_page_row(index, user_initiated=False)
@@ -6373,7 +6441,7 @@ class MainWindow(QMainWindow):
         )
         render_note = None
         if has_page and render_boxes_need_rerun:
-            render_note = "Render boxes changed. Re-render is recommended."
+            render_note = "Render edits changed. Re-render is recommended."
         elif has_page and render_stale:
             render_note = "Upstream detection/OCR/translation/inpaint edits exist. Re-run render when ready."
         elif render_no_text_done:

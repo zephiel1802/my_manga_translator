@@ -11,6 +11,7 @@ from .image_io import ensure_path
 from .json_io import write_json_atomic
 
 RENDER_SCHEMA_VERSION = 1
+DEFAULT_RENDER_LINE_SPACING_RATIO = 0.18
 
 
 class ProjectLike(Protocol):
@@ -192,6 +193,7 @@ def normalize_render_item(item: dict[str, Any] | Any) -> dict[str, Any]:
     normalized.setdefault("stroke_width", 0.0)
     normalized.setdefault("sprite_path", "")
     normalized.setdefault("sprite_transform", {})
+    normalized["style_overrides"] = normalize_render_style_overrides(normalized.get("style_overrides"))
     normalized.setdefault("status", "pending")
     normalized.setdefault("error", "")
     normalized.setdefault("excluded", False)
@@ -201,16 +203,142 @@ def normalize_render_item(item: dict[str, Any] | Any) -> dict[str, Any]:
     return normalized
 
 
+def normalize_render_style_overrides(value: dict[str, Any] | Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        value = {}
+
+    normalized = {str(key): raw_value for key, raw_value in value.items()}
+    normalized["enabled"] = bool(normalized.get("enabled", False))
+    normalized["render_text_override"] = str(normalized.get("render_text_override", "") or "")
+    normalized["font_name"] = str(normalized.get("font_name", "") or "")
+    normalized["font_path"] = str(normalized.get("font_path", "") or "")
+    normalized["font_size_mode"] = _coerce_choice(
+        normalized.get("font_size_mode"),
+        allowed={"inherit", "fit", "fixed"},
+        default="inherit",
+    )
+    normalized["fixed_font_size"] = _coerce_non_negative_int(normalized.get("fixed_font_size"))
+    normalized["min_font_size"] = _coerce_non_negative_int(normalized.get("min_font_size"))
+    normalized["max_font_size"] = _coerce_non_negative_int(normalized.get("max_font_size"))
+    normalized["writing_mode"] = _coerce_choice(
+        normalized.get("writing_mode"),
+        allowed={"inherit", "auto", "horizontal", "vertical_rl"},
+        default="inherit",
+    )
+    normalized["stroke_enabled"] = _coerce_optional_bool(normalized.get("stroke_enabled"))
+    normalized["stroke_width"] = _coerce_optional_float(normalized.get("stroke_width"))
+    normalized["text_color_mode"] = _coerce_choice(
+        normalized.get("text_color_mode"),
+        allowed={"inherit", "auto", "custom"},
+        default="inherit",
+    )
+    normalized["text_color"] = _coerce_color_tuple(normalized.get("text_color"))
+    normalized["stroke_color"] = _coerce_color_tuple(normalized.get("stroke_color"))
+    normalized["line_spacing_ratio"] = _coerce_optional_float(
+        normalized.get("line_spacing_ratio"),
+        minimum=0.01,
+    )
+    return normalized
+
+
+def has_active_style_overrides(value: dict[str, Any] | Any) -> bool:
+    overrides = normalize_render_style_overrides(value)
+    if overrides.get("enabled"):
+        return True
+    for key in (
+        "render_text_override",
+        "font_name",
+        "font_path",
+        "fixed_font_size",
+        "min_font_size",
+        "max_font_size",
+        "text_color",
+        "stroke_color",
+        "stroke_width",
+        "line_spacing_ratio",
+    ):
+        raw_value = overrides.get(key)
+        if raw_value not in (None, "", 0):
+            return True
+    for key in ("font_size_mode", "writing_mode", "text_color_mode"):
+        if str(overrides.get(key, "") or "").strip().lower() not in {"", "inherit"}:
+            return True
+    if overrides.get("stroke_enabled") is not None:
+        return True
+    return False
+
+
+def resolve_render_text(item: dict[str, Any] | Any) -> str:
+    normalized = normalize_render_item(item)
+    overrides = normalized.get("style_overrides", {})
+    override_text = str(overrides.get("render_text_override", "") or "")
+    if override_text.strip():
+        return override_text
+    return str(normalized.get("translated_text", "") or "")
+
+
+def _coerce_choice(value: Any, *, allowed: set[str], default: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if normalized in allowed:
+        return normalized
+    return str(default)
+
+
+def _coerce_non_negative_int(value: Any) -> int:
+    try:
+        parsed = int(value)
+    except Exception:
+        return 0
+    return parsed if parsed > 0 else 0
+
+
+def _coerce_optional_bool(value: Any) -> bool | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return value
+    normalized = str(value).strip().lower()
+    if normalized in {"true", "1", "yes", "on"}:
+        return True
+    if normalized in {"false", "0", "no", "off"}:
+        return False
+    return None
+
+
+def _coerce_optional_float(value: Any, *, minimum: float = 0.0) -> float | None:
+    if value in (None, "", False):
+        return None
+    try:
+        parsed = float(value)
+    except Exception:
+        return None
+    return parsed if parsed >= minimum else None
+
+
+def _coerce_color_tuple(value: Any) -> list[int] | None:
+    if not isinstance(value, (list, tuple)) or len(value) < 3:
+        return None
+    try:
+        red, green, blue = [max(0, min(255, int(channel))) for channel in value[:3]]
+    except Exception:
+        return None
+    return [red, green, blue]
+
+
 def timestamp() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat()
 
 
 __all__ = [
     "RENDER_SCHEMA_VERSION",
+    "DEFAULT_RENDER_LINE_SPACING_RATIO",
+    "has_active_style_overrides",
     "load_render_json",
     "normalize_render_item",
+    "normalize_render_style_overrides",
     "render_image_path",
     "render_json_path",
+    "resolve_render_text",
     "render_sprite_dir",
     "save_render_json",
     "summarize_render_json",

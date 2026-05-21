@@ -445,6 +445,7 @@ class PaddleOCRVLOCR:
         model_path: str | None = None,
         mmproj_path: str | None = None,
         auto_start_server: bool = True,
+        external_server_only: bool = False,
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
         timeout: int = DEFAULT_TIMEOUT,
@@ -469,7 +470,8 @@ class PaddleOCRVLOCR:
         self.llama_cpp_dir = llama_cpp_dir
         self.model_path = model_path
         self.mmproj_path = mmproj_path
-        self.auto_start_server = bool(auto_start_server)
+        self.external_server_only = bool(external_server_only)
+        self.auto_start_server = bool(auto_start_server) and not self.external_server_only
         self.host = host
         self.port = int(port)
         self.timeout = int(timeout)
@@ -618,9 +620,19 @@ class PaddleOCRVLOCR:
                 response = getattr(requests, method)(url, timeout=3)
             except Exception:
                 continue
-            if response.status_code < 500:
+            if 200 <= int(response.status_code) < 400:
                 return True
         return False
+
+    def clear_server_slots(self, *, logger=None) -> dict[str, Any]:
+        from mmt_core.llama_cache import clear_llama_server_slots
+
+        return clear_llama_server_slots(
+            self.server_url,
+            timeout=min(float(self.timeout), 10.0),
+            logger=logger,
+            label="PaddleOCR-VL",
+        )
 
     def _resolve_model_paths(self) -> tuple[Path, Path]:
         return _resolve_model_paths(self.model_path, self.mmproj_path)
@@ -672,6 +684,11 @@ class PaddleOCRVLOCR:
     def ensure_llama_server_running(self) -> None:
         if self.is_server_alive():
             return
+
+        if self.external_server_only:
+            raise PaddleOCRVLError(
+                "Local OCR server is not reachable. Start run_server.bat and check health first."
+            )
 
         if not self.auto_start_server:
             raise PaddleOCRVLError(
@@ -811,10 +828,14 @@ class PaddleOCRVLOCR:
         try:
             return self._chat_completion(pil_image, max_new_tokens=max_new_tokens)
         except PaddleOCRVLError:
+            if self.external_server_only:
+                raise
             if self.auto_start_server and self._has_cli_fallback():
                 return self._recognize_via_cli(pil_image, max_new_tokens=max_new_tokens)
             raise
         except Exception:
+            if self.external_server_only:
+                raise
             if not self.auto_start_server:
                 raise
             return self._recognize_via_cli(pil_image, max_new_tokens=max_new_tokens)
@@ -915,10 +936,16 @@ class PaddleOCRVLOCR:
         For llama.cpp server mode this is intentionally a no-op unless a future
         endpoint or opt-in restart behavior is configured.
         """
+        if self.external_server_only:
+            return
         if os.environ.get("PADDLEOCR_VL_RESTART_SERVER_PER_PAGE", "0") == "1":
             self.close()
 
     def close(self) -> None:
+        if self.external_server_only:
+            self._server_process = None
+            self._server_started_here = False
+            return
         if self._server_process is not None and self._server_started_here:
             self._server_process.terminate()
             try:

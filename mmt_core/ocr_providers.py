@@ -60,6 +60,7 @@ class PaddleOCRVLProvider:
         self._engine = PaddleOCRVLOCR(
             server_url=server_url,
             auto_start_server=False,
+            external_server_only=True,
             timeout=int(self.config.timeout),
         )
 
@@ -94,6 +95,9 @@ class PaddleOCRVLProvider:
             self._engine.close()
         except Exception:
             return None
+
+    def clear_after_page(self, logger: Any = None) -> dict[str, Any]:
+        return self._engine.clear_server_slots(logger=logger)
 
     def item_metadata(self) -> dict[str, Any]:
         return {

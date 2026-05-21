@@ -14,7 +14,11 @@ call C:\Nghich\Manga-Translator\tools\llama.cpp\llama-server.exe ^
   -ngl ^
   99 ^
   --temp ^
-  0
+  0 ^
+  --no-cache-prompt ^
+  --cache-ram ^
+  0 ^
+  --no-cache-idle-slots
 echo.
 echo Server stopped. Press any key to close this window.
 pause >nul

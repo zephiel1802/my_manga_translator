@@ -409,7 +409,10 @@ class LlamaServerManager:
         return "local_ocr"
 
     def _should_disable_prompt_cache(self) -> bool:
-        return self.provider_key == OCR_PROVIDER_DEEPSEEK_OCR_LLAMA
+        return self.provider_key in {
+            OCR_PROVIDER_DEEPSEEK_OCR_LLAMA,
+            OCR_PROVIDER_PADDLE_VL_LLAMA,
+        }
 
     def _parse_extra_args(self, raw_args: str) -> list[str]:
         normalized = str(raw_args or "").strip()

@@ -20,11 +20,15 @@ from .image_io import load_image_bgr, project_relative_path, save_png_image
 from .inpaint_io import inpaint_image_path
 from .ocr_io import load_ocr_json, ocr_json_path
 from .render_io import (
+    DEFAULT_RENDER_LINE_SPACING_RATIO,
     RENDER_SCHEMA_VERSION,
+    has_active_style_overrides,
     load_render_json,
     normalize_render_item,
+    normalize_render_style_overrides,
     render_image_path,
     render_json_path,
+    resolve_render_text,
     render_sprite_dir,
     save_render_json,
     summarize_render_json,
@@ -117,6 +121,18 @@ def prepare_render_for_page(
             existing_data = load_render_json(output_json_path)
         except Exception:
             existing_data = None
+    if existing_data is not None and render_items:
+        render_items = _merge_prepared_render_items(render_items, existing_data)
+
+    edited_items_present = any(
+        bool(item.get("needs_render", False))
+        or bool(item.get("bbox_edited", False))
+        or has_active_style_overrides(item.get("style_overrides"))
+        for item in render_items
+    )
+    preserved_downstream_stale = []
+    if isinstance(existing_data, dict):
+        preserved_downstream_stale = list(existing_data.get("downstream_stale", []) or [])
 
     payload = {
         "schema_version": RENDER_SCHEMA_VERSION,
@@ -136,6 +152,10 @@ def prepare_render_for_page(
         "error": "",
         "created_at": str((existing_data or {}).get("created_at", "") or timestamp()),
         "updated_at": timestamp(),
+        "edited": bool((existing_data or {}).get("edited", False)) or edited_items_present,
+        "edited_at": str((existing_data or {}).get("edited_at", "") or ""),
+        "needs_render": bool((existing_data or {}).get("needs_render", False)) or edited_items_present,
+        "downstream_stale": preserved_downstream_stale if edited_items_present or preserved_downstream_stale else [],
         "settings": {
             "font_name": "",
             "font_path": "",
@@ -339,7 +359,13 @@ def run_render_for_page(
         item["render_bbox"] = canon_item_bbox(canon_item, "render_bbox")
 
         render_bbox = clamp_bbox_to_image(item.get("render_bbox"), base_image.shape)
-        translated_text = str(item.get("translated_text", "") or "").strip()
+        effective_settings = _resolve_effective_render_item_settings(
+            project.root_dir,
+            item,
+            config,
+            default_font_path=resolved_font_path,
+        )
+        translated_text = str(effective_settings.get("text", "") or "").strip()
         if render_bbox is None or bbox_area(render_bbox) < 64:
             item["status"] = "skipped"
             item["error"] = "Render box is invalid or too small."
@@ -353,9 +379,11 @@ def run_render_for_page(
             save_render_json(metadata_path, {**metadata, "items": items, "skipped_item_count": skipped_count})
             continue
 
-        writing_mode = choose_writing_mode(
+        writing_mode = _resolve_writing_mode(
             translated_text,
             render_bbox,
+            item=item,
+            override_mode=str(effective_settings.get("writing_mode", "inherit") or "inherit"),
             source_direction=str(item.get("source_direction", "") or ""),
             auto_direction=config.auto_direction,
             vertical_cjk=config.vertical_cjk,
@@ -368,14 +396,18 @@ def run_render_for_page(
                 kind=str(item.get("kind", "") or "bubble"),
                 source_direction=str(item.get("source_direction", "") or ""),
                 writing_mode=writing_mode,
-                font_path=resolved_font_path,
-                min_font_size=config.min_font_size,
-                max_font_size=config.max_font_size,
-                stroke_enabled=config.stroke_enabled,
-                stroke_width=config.stroke_width,
-                text_color=config.text_color,
-                stroke_color=config.stroke_color,
-                auto_color=config.auto_color,
+                font_path=str(effective_settings.get("font_path", "") or resolved_font_path),
+                min_font_size=int(effective_settings.get("min_font_size", config.min_font_size) or config.min_font_size),
+                max_font_size=int(effective_settings.get("max_font_size", config.max_font_size) or config.max_font_size),
+                stroke_enabled=bool(effective_settings.get("stroke_enabled", config.stroke_enabled)),
+                stroke_width=effective_settings.get("stroke_width"),
+                text_color=effective_settings.get("text_color"),
+                stroke_color=effective_settings.get("stroke_color"),
+                auto_color=bool(effective_settings.get("auto_color", config.auto_color)),
+                line_spacing_ratio=float(
+                    effective_settings.get("line_spacing_ratio", DEFAULT_RENDER_LINE_SPACING_RATIO)
+                    or DEFAULT_RENDER_LINE_SPACING_RATIO
+                ),
             )
         except Exception as exc:
             item["status"] = "error"
@@ -392,7 +424,7 @@ def run_render_for_page(
         alpha_composite_onto_bgr(base_image, sprite_rgba, render_bbox)
         item["writing_mode"] = writing_mode
         item["font_size"] = int(render_details.get("font_size", 0) or 0)
-        item["font_path"] = str(render_details.get("font_path", "") or resolved_font_path)
+        item["font_path"] = str(render_details.get("font_path", "") or effective_settings.get("font_path") or resolved_font_path)
         item["text_color"] = coerce_serializable_color(render_details.get("text_color"))
         item["stroke_color"] = coerce_serializable_color(render_details.get("stroke_color"))
         item["stroke_width"] = float(render_details.get("stroke_width", 0.0) or 0.0)
@@ -582,6 +614,7 @@ def build_render_items_from_translation(
             "text_color": None,
             "stroke_color": None,
             "stroke_width": 0.0,
+            "style_overrides": {},
             "sprite_path": "",
             "sprite_transform": {},
             "status": "pending",
@@ -697,6 +730,7 @@ def _render_item_sprite(
     text_color: tuple[int, int, int] | None,
     stroke_color: tuple[int, int, int] | None,
     auto_color: bool,
+    line_spacing_ratio: float = DEFAULT_RENDER_LINE_SPACING_RATIO,
 ) -> tuple[Any, dict[str, Any]]:
     try:
         import numpy as np
@@ -758,6 +792,7 @@ def _render_item_sprite(
             fill_rgba=fill_rgba,
             stroke_rgba=stroke_rgba,
             stroke_width=integer_stroke_width,
+            line_spacing_ratio=line_spacing_ratio,
         )
     else:
         render_details = _draw_horizontal_text(
@@ -771,6 +806,7 @@ def _render_item_sprite(
             fill_rgba=fill_rgba,
             stroke_rgba=stroke_rgba,
             stroke_width=integer_stroke_width,
+            line_spacing_ratio=line_spacing_ratio,
         )
 
     return np.asarray(overlay, dtype=np.uint8), {
@@ -795,6 +831,7 @@ def _draw_horizontal_text(
     fill_rgba: tuple[int, int, int, int],
     stroke_rgba: tuple[int, int, int, int] | None,
     stroke_width: int,
+    line_spacing_ratio: float = DEFAULT_RENDER_LINE_SPACING_RATIO,
 ) -> dict[str, Any]:
     padding = max(2, int(round(min(width, height) * 0.04)))
     layout = fit_text_layout(
@@ -807,7 +844,7 @@ def _draw_horizontal_text(
         min_font_size=min_font_size,
         max_font_size=max_font_size,
         stroke_width=stroke_width,
-        line_spacing_ratio=0.18,
+        line_spacing_ratio=line_spacing_ratio,
         min_line_spacing=1,
     )
 
@@ -852,6 +889,7 @@ def _draw_vertical_text(
     fill_rgba: tuple[int, int, int, int],
     stroke_rgba: tuple[int, int, int, int] | None,
     stroke_width: int,
+    line_spacing_ratio: float = DEFAULT_RENDER_LINE_SPACING_RATIO,
 ) -> dict[str, Any]:
     padding = max(2, int(round(min(width, height) * 0.04)))
     usable_width = max(1, width - (padding * 2))
@@ -862,7 +900,7 @@ def _draw_vertical_text(
 
     for font_size in range(max_font_size, max(min_font_size - 1, 0), -1):
         font = get_cached_font(font_path, font_size)
-        line_gap = max(1, int(round(font_size * 0.12)))
+        line_gap = max(1, int(round(font_size * float(line_spacing_ratio))))
         column_gap = max(1, int(round(font_size * 0.18)))
 
         token_metrics: dict[str, tuple[int, int, tuple[int, int, int, int]]] = {}
@@ -914,7 +952,7 @@ def _draw_vertical_text(
     if best_layout is None:
         fallback_size = min_font_size
         font = get_cached_font(font_path, fallback_size)
-        line_gap = max(1, int(round(fallback_size * 0.12)))
+        line_gap = max(1, int(round(fallback_size * float(line_spacing_ratio))))
         column_gap = max(1, int(round(fallback_size * 0.18)))
         columns = [paragraph for paragraph in paragraphs if paragraph] or [[]]
         token_metrics: dict[str, tuple[int, int, tuple[int, int, int, int]]] = {}
@@ -984,6 +1022,149 @@ def _load_existing_render_metadata(path: Path) -> dict[str, Any] | None:
         return load_render_json(path)
     except Exception:
         return None
+
+
+def _existing_render_items_by_canon_id(existing_data: dict[str, Any] | None) -> dict[str, dict[str, Any]]:
+    if not isinstance(existing_data, dict):
+        return {}
+    items = existing_data.get("items", [])
+    if not isinstance(items, list):
+        return {}
+    return {
+        str(item.get("canon_id", "") or ""): normalize_render_item(item)
+        for item in items
+        if isinstance(item, dict) and str(item.get("canon_id", "") or "").strip()
+    }
+
+
+def _merge_prepared_render_items(
+    render_items: list[dict[str, Any]],
+    existing_data: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    existing_items_by_canon_id = _existing_render_items_by_canon_id(existing_data)
+    if not existing_items_by_canon_id:
+        return render_items
+
+    merged_items: list[dict[str, Any]] = []
+    for item in render_items:
+        canon_id = str(item.get("canon_id", "") or "").strip()
+        existing_item = existing_items_by_canon_id.get(canon_id)
+        if existing_item is not None:
+            item["style_overrides"] = normalize_render_style_overrides(existing_item.get("style_overrides"))
+            item["bbox_edited"] = bool(existing_item.get("bbox_edited", False))
+            item["bbox_edited_at"] = str(existing_item.get("bbox_edited_at", "") or "")
+            if bool(existing_item.get("needs_render", False)) or has_active_style_overrides(item.get("style_overrides")):
+                item["needs_render"] = True
+        merged_items.append(normalize_render_item(item))
+    return merged_items
+
+
+def _resolve_effective_render_item_settings(
+    project_root: Path,
+    item: dict[str, Any],
+    config: RenderConfig,
+    *,
+    default_font_path: str,
+) -> dict[str, Any]:
+    normalized_item = normalize_render_item(item)
+    overrides = normalize_render_style_overrides(normalized_item.get("style_overrides"))
+
+    font_name = overrides.get("font_name") or config.font_name
+    font_path = overrides.get("font_path") or config.font_path or default_font_path
+    resolved_font_path = resolve_font_path(
+        project_root,
+        font_name=str(font_name or ""),
+        font_path=str(font_path or ""),
+    )
+
+    font_size_mode = str(overrides.get("font_size_mode", "inherit") or "inherit")
+    min_font_size = int(config.min_font_size)
+    max_font_size = int(config.max_font_size)
+    if font_size_mode == "fixed":
+        fixed_size = int(overrides.get("fixed_font_size", 0) or 0)
+        if fixed_size > 0:
+            min_font_size = fixed_size
+            max_font_size = fixed_size
+    else:
+        override_min = int(overrides.get("min_font_size", 0) or 0)
+        override_max = int(overrides.get("max_font_size", 0) or 0)
+        if override_min > 0:
+            min_font_size = override_min
+        if override_max > 0:
+            max_font_size = max(min_font_size, override_max)
+        else:
+            max_font_size = max(min_font_size, max_font_size)
+
+    stroke_enabled = config.stroke_enabled if overrides.get("stroke_enabled") is None else bool(overrides.get("stroke_enabled"))
+    stroke_width = overrides.get("stroke_width")
+    if stroke_width is None:
+        stroke_width = config.stroke_width
+
+    text_color_mode = str(overrides.get("text_color_mode", "inherit") or "inherit")
+    auto_color = config.auto_color
+    text_color = config.text_color
+    stroke_color = config.stroke_color
+    if text_color_mode == "auto":
+        auto_color = True
+        text_color = None
+    elif text_color_mode == "custom":
+        auto_color = False
+        if isinstance(overrides.get("text_color"), list):
+            text_color = tuple(int(channel) for channel in overrides["text_color"][:3])
+        if isinstance(overrides.get("stroke_color"), list):
+            stroke_color = tuple(int(channel) for channel in overrides["stroke_color"][:3])
+    else:
+        if isinstance(overrides.get("stroke_color"), list):
+            stroke_color = tuple(int(channel) for channel in overrides["stroke_color"][:3])
+
+    return {
+        "text": resolve_render_text(normalized_item),
+        "font_path": resolved_font_path,
+        "min_font_size": min_font_size,
+        "max_font_size": max(max_font_size, min_font_size),
+        "stroke_enabled": stroke_enabled,
+        "stroke_width": stroke_width,
+        "text_color": text_color,
+        "stroke_color": stroke_color,
+        "auto_color": auto_color,
+        "writing_mode": str(overrides.get("writing_mode", "inherit") or "inherit"),
+        "line_spacing_ratio": float(
+            overrides.get("line_spacing_ratio")
+            or DEFAULT_RENDER_LINE_SPACING_RATIO
+        ),
+    }
+
+
+def _resolve_writing_mode(
+    text: str,
+    bbox: tuple[int, int, int, int],
+    *,
+    item: dict[str, Any],
+    override_mode: str,
+    source_direction: str,
+    auto_direction: bool,
+    vertical_cjk: bool,
+) -> str:
+    normalized_override = str(override_mode or "inherit").strip().lower()
+    if normalized_override == "horizontal":
+        return "horizontal"
+    if normalized_override == "vertical_rl":
+        return "vertical_rl"
+    if normalized_override == "auto":
+        return choose_writing_mode(
+            text,
+            bbox,
+            source_direction=source_direction or str(item.get("source_direction", "") or ""),
+            auto_direction=True,
+            vertical_cjk=True,
+        )
+    return choose_writing_mode(
+        text,
+        bbox,
+        source_direction=source_direction or str(item.get("source_direction", "") or ""),
+        auto_direction=auto_direction,
+        vertical_cjk=vertical_cjk,
+    )
 
 
 def _log(logger: Logger | None, message: str) -> None:

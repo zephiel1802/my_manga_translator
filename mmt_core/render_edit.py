@@ -18,7 +18,13 @@ from .canon_state import (
 )
 from .detection_io import load_detection_json, save_detection_json
 from .image_io import ensure_path
-from .render_io import load_render_json, normalize_render_item, save_render_json
+from .render_io import (
+    has_active_style_overrides,
+    load_render_json,
+    normalize_render_item,
+    normalize_render_style_overrides,
+    save_render_json,
+)
 
 DOWNSTREAM_STALE_STAGES = ["render", "export"]
 MIN_BOX_SIZE = 4
@@ -153,6 +159,48 @@ def restore_render_item(path: Path | str, item_id: int) -> dict[str, Any]:
     """Restore one previously excluded render item."""
 
     return exclude_render_item(path, item_id, False)
+
+
+def update_render_item_style_overrides(
+    path: Path | str,
+    item_id: int,
+    style_overrides: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Persist one render item's manual text/style overrides."""
+
+    json_path = ensure_path(path)
+    payload = load_render_json(json_path)
+    items = payload.get("items", [])
+    if not isinstance(items, list):
+        raise ValueError("Render cache field 'items' must be a list.")
+
+    target_item = None
+    for index, raw_item in enumerate(items):
+        if not isinstance(raw_item, dict):
+            continue
+        normalized_item = normalize_render_item(raw_item)
+        if _safe_int(normalized_item.get("id")) == int(item_id):
+            target_item = raw_item
+            break
+
+    if target_item is None:
+        raise ValueError(f"Render item {item_id} was not found in {json_path}")
+
+    timestamp_value = _timestamp()
+    normalized_overrides = normalize_render_style_overrides(style_overrides)
+    normalized_overrides["enabled"] = has_active_style_overrides(normalized_overrides)
+    target_item["style_overrides"] = normalized_overrides
+    target_item["needs_render"] = True
+    target_item["error"] = ""
+    target_item["edited_at"] = timestamp_value
+
+    payload["updated_at"] = timestamp_value
+    payload["edited"] = True
+    payload["edited_at"] = timestamp_value
+    payload["needs_render"] = True
+    payload["downstream_stale"] = list(DOWNSTREAM_STALE_STAGES)
+    payload["items"] = [normalize_render_item(item) for item in items]
+    return _save_render_payload(payload, json_path)
 
 
 def summarize_render_edit_state(data: dict[str, Any]) -> dict[str, Any]:
@@ -324,5 +372,6 @@ __all__ = [
     "restore_render_item",
     "save_render_edit_items",
     "summarize_render_edit_state",
+    "update_render_item_style_overrides",
     "update_render_item_bbox",
 ]
