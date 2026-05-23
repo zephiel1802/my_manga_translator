@@ -1,464 +1,312 @@
-# Manga Translator
+# ⚡ MANGA TRANSLATOR STUDIO - BUỒNG LÁI DỊCH THUẬT TRUYỆN TRANH ĐA BƯỚC
 
-Ứng dụng desktop dịch manga/comic theo quy trình nhiều bước, xây dựng bằng PyQt6. Dự án tập trung vào một workflow thực tế: phát hiện vùng chữ, OCR, dịch, xóa chữ gốc, render lại bản dịch và xuất kết quả cuối cùng theo từng trang hoặc cả project.
+```text
+   __  ___                               ________                               __      __
+  /  |/  /___ _____  ____ _____ _       /_  __/ /_  ____ _____  _____  / /___ _/ /_____/ /_
+ / /|_/ / __ `/ __ \/ / / / __ `/  ______/ / / __ \/ __ `/ __ \/ ___/ / / __ `/ __/ __  / __/
+/ /  / / /_/ / / / / /_/ / /_/ /  /_____/ / / / / / /_/ / / / (__  ) / / /_/ / /_/ /_/ / /_  
+/_/  /_/\__,_/_/ /_/\__, /\__,_/        /_/ /_/ /_/\__,_/_/ /_/____/ /_/\__,_/\__/\__,_/\__/  
+                  /____/                                                                      
+            [ BUỒNG LÁI XỬ LÝ & DỊCH THUẬT TRUYỆN TRANH TOÀN DIỆN CHO WIBU CHUYÊN NGHIỆP ]
+```
 
-## Mục lục
+**Manga Translator Studio** là một bộ công cụ dịch thuật truyện tranh (manga/comic) chuyên nghiệp được xây dựng trên nền tảng **PyQt6** dành cho các dịch giả và editor khó tính nhất. 
 
-- [Mục đích của ứng dụng](#mục-đích-của-ứng-dụng)
-- [Tính năng chính](#tính-năng-chính)
-- [Kiến trúc tổng thể](#kiến-trúc-tổng-thể)
-- [Cấu trúc thư mục](#cấu-trúc-thư-mục)
-- [Pipeline xử lý](#pipeline-xử-lý)
-- [Yêu cầu hệ thống](#yêu-cầu-hệ-thống)
-- [Cài đặt](#cài-đặt)
-- [Chuẩn bị model và công cụ](#chuẩn-bị-model-và-công-cụ)
-- [Khởi chạy ứng dụng](#khởi-chạy-ứng-dụng)
-- [Hướng dẫn sử dụng](#hướng-dẫn-sử-dụng)
-- [OCR và translator đang hỗ trợ](#ocr-và-translator-đang-hỗ-trợ)
-- [Cấu trúc project làm việc](#cấu-trúc-project-làm-việc)
-- [Log, cache và dữ liệu sinh ra](#log-cache-và-dữ-liệu-sinh-ra)
-- [Ghi chú phát triển](#ghi-chú-phát-triển)
-- [Sự cố thường gặp](#sự-cố-thường-gặp)
+Khác biệt hoàn toàn so với các công cụ dịch tự động một nút bấm cẩu thả làm biến dạng art và xô lệch khung thoại, dự án này áp dụng triết lý dịch thuật **Human-in-the-loop** (con người kiểm soát quy trình) đa tầng. Công cụ này được thiết kế để đập tan mọi nỗi ác mộng của một dịch giả truyện tranh thực thụ: **nhận diện sai bong bóng thoại, OCR dịch láo thiếu chữ, văn phong AI freestyle vô tội vạ, inpaint (xóa chữ) lem nhem phá art gốc, và render chữ Việt hóa thô kệch thiếu tính nghệ thuật.**
 
-## Mục đích của ứng dụng
+> [!WARNING]
+> **ĐÂY KHÔNG PHẢI LÀ MỘT CÔNG CỤ ĂN SẴN KHÔNG NÃO.**
+> Dự án này không tự tiện gọi API vô tội vạ hay tạo ra những sản phẩm dịch thuật mì ăn liền cẩu thả. Hệ thống hoạt động như một **Môi trường Studio (Workbench)** giúp lưu trữ cache dữ liệu thô trung gian sạch sẽ, tự động xử lý các tác vụ lặp đi lặp lại tẻ nhạt, đồng thời cung cấp giao diện trực quan cho phép bạn can thiệp, chỉnh sửa thủ công và kiểm soát chất lượng tuyệt đối ở từng giai đoạn (Stage).
 
-`Manga Translator` được xây dựng để hỗ trợ dịch manga/comic theo ba mức độ:
+---
 
-- Tự động: chạy gần như toàn bộ pipeline từ ảnh nguồn đến ảnh đã render.
-- Bán tự động: cho phép kiểm tra và chỉnh sửa ở từng stage quan trọng.
-- Thủ công có hỗ trợ: dùng ứng dụng như một workbench để quản lý project, cache và dữ liệu trung gian.
+## 📸 Giao Diện Thực Tế (Visual Showcase)
 
-Mục tiêu của dự án không chỉ là dịch văn bản, mà là tạo ra một môi trường xử lý truyện tranh có thể:
+| 🖥️ Giao Diện Điều Khiển Stage | 📝 Trình Tinh Chỉnh Dữ Liệu |
+| :---: | :---: |
+| ![Giao Diện Điều Khiển Stage](Screenshot/Main_UI.png) | ![Trình Tinh Chỉnh Dữ Liệu](Screenshot/Editor_UI.png) |
 
-- làm việc theo từng trang;
-- lưu cache để không phải chạy lại từ đầu;
-- cho phép can thiệp thủ công khi detection, OCR hoặc render chưa đạt chất lượng mong muốn;
-- hỗ trợ cả local workflow lẫn workflow dùng API.
+> [!TIP]
+> *Hãy chụp những bức ảnh chụp màn hình tuyệt đẹp về giao diện ứng dụng của bạn và lưu vào thư mục `Screenshot/` để làm sáng bừng file README này nhé!*
 
-## Tính năng chính
+---
 
-- Giao diện desktop PyQt6 theo workflow nhiều stage.
-- Quản lý project riêng với `project.json`, `source/` và `cache/`.
-- Tách rõ các bước Detection, OCR, Translation, Inpaint, Render, Export.
-- Hỗ trợ chạy từng bước riêng lẻ hoặc chạy pipeline một chạm.
-- Lưu kết quả trung gian theo từng trang để tiếp tục làm việc ở lần mở sau.
-- Cho phép chỉnh sửa detection item, OCR item, translation item và render item.
-- Hỗ trợ OCR local qua `llama.cpp`.
-- Hỗ trợ nhiều translator, từ local LLM đến các backend API.
-- Render lại text bằng font truyện tranh thay vì cách chèn text thô đơn giản.
+## 🧭 Các Trụ Cột Trong Buồng Lái
 
-## Kiến trúc tổng thể
+Giao diện chính được xây dựng bằng **PyQt6** với thiết kế màu đêm tối Cyberpunk tuyệt đẹp, giảm mỏi mắt tối đa khi dịch giả cày cuốc truyện lúc 2 giờ sáng. 
 
-Dự án hiện xoay quanh hai phần chính:
+### 1. Cây Điều Hướng Cấp Độ & Tiến Độ (Project Stage Navigator)
+Cây điều hướng lề trái là xương sống giúp bạn kiểm soát dòng chảy công việc của toàn bộ dự án:
+- **📁 Quản lý Project**: Khởi tạo cấu trúc dự án chuẩn chỉ với `project.json` riêng biệt, import ảnh gốc nhanh chóng.
+- **📋 Theo dõi Tiến độ**: Hiển thị trạng thái hoàn thành trực quan của từng trang theo các mã màu neon rực rỡ: `Done` (Hoàn tất) | `Partial` (Đang xử lý) | `Not Started` (Chưa chạm vào).
 
-- `mmt_gui/`: giao diện desktop, stage panel, worker, service và thành phần hiển thị.
-- `mmt_core/`: lõi pipeline, cache I/O, orchestration và xử lý nghiệp vụ.
+### 2. Các Stage Xử Lý Độc Lập (Modular Pipeline Stages)
+Pipeline được chia nhỏ thành các module tách biệt hoàn toàn để bạn dễ dàng sửa lỗi và tối ưu hóa từng bước:
+- **🔍 Detection**: Quét toàn bộ trang truyện để phát hiện chính xác vùng chữ (Text Region) và bong bóng thoại (Speech Bubble).
+- **📝 OCR & Translation**: Tích hợp các công cụ nhận diện chữ gốc (PaddleOCR, Llama.cpp, Chrome Lens) và dịch thuật thông minh (Gemini, OpenAI, DeepSeek, Google, NLLB...).
+- **🎨 Masking & Inpainting**: Tạo mask che phủ tự động và ứng dụng thuật toán **LaMa Manga Inpainting** để tẩy sạch chữ gốc mà vẫn bảo toàn nét vẽ art cực kỳ mượt mà.
+- **✍️ Typesetting & Render**: Tự động dàn trang, tính toán kích thước, xuống dòng và render bản dịch tiếng Việt bằng font chữ chuyên dùng cho truyện tranh thay vì chèn text thô sơ lỗi thời.
 
-Các backend xử lý dùng chung:
+### 3. Trình Soạn Thảo Tương Tác Trực Quan (Visual Interactive Editor)
+Cho phép dịch giả can thiệp sâu vào dữ liệu trung gian:
+- Loại bỏ các vùng phát hiện sai hoặc khôi phục các bong bóng thoại bị sót.
+- Chỉnh sửa trực tiếp văn bản OCR nhận diện lỗi trước khi đưa đi dịch.
+- Tinh chỉnh bản dịch thủ công để đảm bảo văn phong mượt mà, đậm chất Việt hóa.
+- Thay đổi kích thước, màu sắc, vị trí và font chữ của văn bản render trực tiếp ngay trên giao diện preview thời gian thực.
 
-- `detectors/`: phát hiện layout và speech bubble.
-- `ocr/`: tích hợp OCR engine.
-- `inpainting/`: xử lý mask và LaMa Manga.
-- `translator/`: các translator và helper dịch batch.
-- `text_rendering/`: layout text và render kết quả cuối.
+---
 
-Thiết kế hiện tại theo hướng:
+## 🔄 Luồng Làm Việc Tiêu Chuẩn (Core Pipeline Workflow)
 
-- GUI chịu trách nhiệm điều phối và hiển thị trạng thái.
-- `mmt_core` chịu trách nhiệm xử lý pipeline và quản lý dữ liệu trung gian.
-- Các package backend được tái sử dụng xuyên suốt nhiều stage.
+Mỗi trang truyện đi qua một quy trình chế tác nghiêm ngặt gồm 10 bước khép kín để đảm bảo chất lượng thành phẩm cao nhất:
 
-## Cấu trúc thư mục
+```mermaid
+graph TD
+    Start([🖼️ Ảnh Manga Nguồn]) --> Stage1[1. Detection <br>Phát hiện Layout/Bong bóng]
+    Stage1 --> Stage2[2. OCR Prepare <br>Chuẩn hóa & Crop ảnh vùng chữ]
+    Stage2 --> Stage3[3. OCR <br>Nhận diện chữ gốc trên vùng crop]
+    Stage3 --> Stage4[4. Translation Init <br>Khởi tạo dữ liệu dịch thuật]
+    Stage4 --> Stage5[5. Translation <br>Dịch nghĩa qua AI/Translator]
+    Stage5 --> Stage6[6. Mask Prepare <br>Tạo mặt nạ che phủ chữ gốc]
+    Stage6 --> Stage7[7. Inpaint <br>Tẩy sạch chữ bằng LaMa Manga]
+    Stage7 --> Stage8[8. Render Prepare <br>Chuẩn bị đối tượng dàn chữ]
+    Stage8 --> Stage9[9. Render <br>Dàn font truyện tranh lên ảnh sạch]
+    Stage9 --> Stage10[10. Export <br>Xuất bản ảnh dịch hoàn chỉnh]
+    Stage10 --> End([🏆 Tác Phẩm Việt Hóa Hoàn Mỹ])
+```
 
-Các thành phần chính còn có trong repo:
+### Các Mức Độ Vận Hành Linh Hoạt:
+1. **Tự động hoàn toàn (Automatic Mode)**: Chạy một chạm xuyên suốt từ bước 1 đến bước 9 cho một trang hoặc toàn bộ project. Phù hợp khi bạn đã có cấu hình API dịch thuật ưng ý và muốn xem nhanh kết quả nháp.
+2. **Bán tự động (Semi-Automatic Mode)**: Chạy từng bước và dừng lại để tinh chỉnh thủ công các dữ liệu thô trung gian (ví dụ: sửa lỗi nhận diện chữ của OCR trước khi gửi đi dịch để tránh AI dịch sai ngữ cảnh).
+3. **Thủ công hoàn toàn (Manual Workbench)**: Sử dụng ứng dụng như một bảng vẽ kỹ thuật để tự tay edit, dịch và dàn chữ trên nền tảng quản lý dự án tối ưu.
+
+---
+
+## 🧠 Cơ Chế Quản Lý Cache & Workspace Siêu Bền Bỉ
+
+Điểm vượt trội của **Manga Translator Studio** so với các script chạy dòng lệnh thô sơ là kiến trúc lưu vết và bảo vệ dữ liệu tuyệt đối:
+
+### 1. Dữ liệu trung gian tách biệt (Stage Cache Separation)
+Toàn bộ dữ liệu của từng bước xử lý trên mỗi trang được lưu trữ độc lập dưới dạng file JSON trong thư mục `cache/`.
+- Nếu bước **Inpaint** bị lỗi hoặc bạn muốn đổi font render, bạn **không cần phải chạy lại bước OCR và Translation**. Hệ thống chỉ việc lôi cache cũ ra xử lý tiếp. Tiết kiệm 100% chi phí token API và thời gian chờ đợi vô lý!
+
+### 2. Định dạng lưu trữ siêu bền bỉ
+Các cấu hình và liên kết trang được ghi đè an toàn vào `project.json`. Dữ liệu tọa độ, mask, văn bản thô được phân tách rạch ròi, giúp bạn dễ dàng đóng gói, sao lưu hoặc thậm chí chỉnh sửa trực tiếp bằng tay qua text editor ngoài nếu muốn.
+
+---
+
+## 📂 Bản Đồ Thư Mục Dự Án (Project Anatomy)
+
+Mã nguồn được tổ chức khoa học, phân định rõ ràng giữa giao diện hiển thị (GUI), lõi xử lý (Core) và các backend độc lập:
 
 ```text
 Manga-Translator/
-├─ mmt_gui/                    # Giao diện desktop PyQt6
-├─ mmt_core/                   # Lõi pipeline và quản lý cache
-├─ detectors/                  # Detection backend
-├─ ocr/                        # OCR backend
-├─ inpainting/                 # Inpainting backend
-├─ translator/                 # Translation backend
-├─ text_rendering/             # Render text
-├─ fonts/                      # Font dùng khi render
-├─ model/                      # Model local
-├─ tools/                      # Công cụ local như llama.cpp
-├─ pj/                         # Project mẫu / dữ liệu làm việc mẫu
-├─ logs/                       # Log runtime cấp workspace
-├─ PyQt_run.bat                # Cách chạy app nhanh trên Windows
-├─ requirements.txt            # Phụ thuộc Python chính
-├─ requirements-merged-final.txt
-├─ requirements_1.txt
-└─ README.md
+├── mmt_gui/                    # 🖥️ Giao diện desktop PyQt6 chuyên nghiệp
+│   ├── main.py                 # Entrypoint khởi động giao diện chính
+│   ├── stages/                 # Các bảng điều khiển riêng cho từng stage
+│   └── workers/                # Các luồng xử lý nền (QThread) chống treo GUI
+├── mmt_core/                   # 🧠 Lõi điều phối pipeline và quản lý cache
+│   ├── project.py              # Xử lý I/O cấu trúc project
+│   └── pipeline.py             # Bộ điều phối thứ tự chạy các stage
+├── detectors/                  # 🔍 Backend phát hiện layout và bong bóng thoại
+├── ocr/                        # 📝 Backend tích hợp các công cụ OCR
+├── inpainting/                 # 🎨 Backend xử lý mặt nạ tẩy chữ (LaMa Manga)
+├── translator/                 # 🌐 Backend dịch thuật đa nền tảng
+├── text_rendering/             # ✍️ Công cụ tính toán bố cục dàn chữ & render
+├── fonts/                      # 🔠 Kho font chữ truyện tranh được chọn lọc
+├── model/                      # 🤖 Thư mục chứa các checkpoint model local (nếu có)
+├── tools/                      # 🛠️ Các công cụ nhị phân bổ trợ (llama.cpp...)
+├── pj/                         # 📁 Thư mục chứa các Project mẫu làm việc
+├── logs/                       # 📝 Log runtime phục vụ debug hệ thống
+├── PyQt_run.bat                # ⚡ Script chạy nhanh ứng dụng trên Windows
+├── requirements.txt            # 📦 Danh sách thư viện Python cốt lõi
+└── README.md                   # 📖 Bản hướng dẫn sử dụng siêu ngầu này
 ```
 
-Ngoài ra ở thư mục gốc vẫn còn một số script helper hoặc mã cũ phục vụ tham chiếu kỹ thuật, ví dụ:
+---
 
-- `add_text.py`
-- `batch_ocr_flow.py`
-- `detect_bubbles.py`
-- `font_analyzer.py`
-- `ocr_crop_utils.py`
-- `process_bubble.py`
-- `render_item_utils.py`
+## 🛠️ Hướng Dẫn Kích Hoạt Buồng Lái
 
-Chúng không phải entrypoint chính của ứng dụng hiện tại. Đường chạy chính là desktop app trong `mmt_gui/` và `mmt_core/`.
+### 1. Chuẩn Bị Môi Trường Cực Nhanh
+Yêu cầu hệ thống cài đặt sẵn **Python 3.11** (khuyến nghị để đảm bảo tính tương thích tốt nhất của các thư viện AI). Clone repository này về máy của bạn:
 
-## Pipeline xử lý
+```bash
+git clone <url-repository-cua-ban>
+cd my_manga_translator
+```
 
-Pipeline hiện tại của ứng dụng gồm các bước chính sau:
+### 2. Thiết Lập Môi Trường Ảo (Virtual Environment)
 
-1. `Detection`
-   - Phát hiện layout/text region.
-   - Phát hiện speech bubble bằng segmentation.
-
-2. `OCR Prepare`
-   - Chuẩn hóa detection thành OCR item nội bộ.
-   - Cắt crop theo vùng OCR.
-
-3. `OCR`
-   - Gửi crop đến OCR provider đã chọn.
-   - Ghi kết quả OCR vào cache.
-
-4. `Translation Init`
-   - Khởi tạo dữ liệu dịch từ OCR cache.
-
-5. `Translation`
-   - Dịch text bằng translator đã chọn.
-   - Có thể chạy theo batch nếu backend hỗ trợ.
-
-6. `Mask Prepare`
-   - Tạo mask để chuẩn bị xóa text gốc.
-
-7. `Inpaint`
-   - Xóa vùng text gốc trên ảnh.
-
-8. `Render Prepare`
-   - Chuyển dữ liệu dịch thành render item.
-
-9. `Render`
-   - Dàn chữ và render bản dịch lên ảnh đã inpaint.
-
-10. `Export`
-   - Xuất ảnh đầu ra từ dữ liệu render.
-
-Ứng dụng cũng có luồng xử lý một chạm từ Detection đến Render cho một trang hoặc toàn bộ project.
-
-## Yêu cầu hệ thống
-
-Khuyến nghị:
-
-- Windows
-- Python 3.11
-- Môi trường ảo `.venv`
-
-Tài nguyên phần cứng:
-
-- GPU là tùy chọn, không bắt buộc để khởi chạy ứng dụng.
-- Nếu chạy OCR/inpainting/detection nặng trên CPU, thời gian xử lý có thể đáng kể.
-
-Các thư viện nặng thường tham gia pipeline:
-
-- `torch`
-- `torchvision`
-- `ultralytics`
-- `transformers`
-
-## Cài đặt
-
-### PowerShell
-
+#### 💻 Trên Windows (PowerShell):
 ```powershell
+# Khởi tạo môi trường ảo chuyên biệt
 py -3.11 -m venv .venv
+
+# Kích hoạt môi trường ảo
 .venv\Scripts\Activate.ps1
+
+# Nâng cấp pip và cài đặt toàn bộ gói phụ thuộc
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-### CMD
-
-```bat
+#### 💻 Trên Windows (Command Prompt - CMD):
+```cmd
 py -3.11 -m venv .venv
 .venv\Scripts\activate.bat
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
-Sau khi cài xong, kiểm tra nhanh:
+---
+
+## 🚀 Khởi Chạy Ứng Dụng
+
+Sau khi quá trình cài đặt hoàn tất, bạn có thể khởi chạy buồng lái bằng một trong hai cách:
+
+1. **Nhấp đúp chuột** trực tiếp vào tệp **`PyQt_run.bat`** ở thư mục gốc của dự án.
+2. **Chạy trực tiếp từ dòng lệnh** (khi môi trường ảo đã được kích hoạt):
 
 ```powershell
-python --version
 python -m mmt_gui.main
 ```
 
-## Chuẩn bị model và công cụ
+---
 
-### Model local
+## ⚙️ Kho Model & Cấu Hình Khuyến Nghị (Model Zoo & Hardware Guidelines)
 
-Repo hiện dùng thư mục `model/` để chứa model local và cache model. Tùy cấu hình bạn có thể cần:
+Manga Translator Studio hỗ trợ kết hợp cực kỳ linh hoạt giữa các tác vụ chạy offline (Local Deep Learning) và gọi API Cloud (Online) giúp bạn cân bằng hoàn hảo giữa chi phí, tốc độ và chất lượng dịch thuật. Dưới đây là thông số chi tiết của các model đang được tích hợp:
 
-- model cho detection;
-- model cho inpainting;
-- model OCR local;
-- model/mmproj cho các backend chạy qua `llama.cpp`.
+### 1. Trình Phát Hiện Vùng Chữ (Detectors)
+*   **`PP-DoclayoutV3 + YOLOv8m (Manga Bubble version)`**:
+    *   *Đặc điểm*: Model thuộc phân khúc tầm trung, được tinh chỉnh (fine-tuned) đặc biệt cho bong bóng thoại manga.
+    *   *Đánh giá*: Vẫn còn tồn tại một vài bug nhỏ khi nhận diện bố cục phức tạp, nhưng là một lựa chọn cực kỳ đáng giá cho các cấu hình phần cứng tầm trung. Chạy bằng CPU cho tốc độ tạm ổn, không quá nặng nề.
+*   **`Manga RT-DETR`**:
+    *   *Đặc điểm*: Hàng ngon đỉnh cấp, được thiết kế chuyên biệt và tối ưu hóa ở mức cao nhất cho tác vụ phát hiện bong bóng manga.
+    *   *Đánh giá*: Tốc độ nhận diện real-time cực nhanh, độ chính xác gần như hoàn hảo. Đây là model được tác giả cực kỳ yêu thích và khuyên dùng làm mặc định.
 
-`model/` là dữ liệu local, có thể lớn và thường không phù hợp để quản lý như mã nguồn.
+### 2. Trình Nhận Diện Chữ (OCR Engines)
+*   **`Online LLM (Claude, GPT, Gemini)`**:
+    *   *Đặc điểm*: Gửi trực tiếp ảnh crop qua API của các mô hình ngôn ngữ lớn có khả năng thị giác (Vision).
+    *   *Đánh giá*: Chất lượng nhận diện và xử lý ngữ cảnh đỉnh cao, tùy thuộc vào ngân sách của bạn. "Giàu thì cứ Claude mà vã", chất lượng sẽ không làm bạn thất vọng.
+*   **`Online Google Lens`**:
+    *   *Đặc điểm*: Sử dụng engine nhận diện miễn phí vô cùng mạnh mẽ của Google Lens thông qua các helper API.
+    *   *Đánh giá*: Chất lượng cực tốt, độ chính xác sánh ngang với các mô hình LLM thương mại lớn. Điểm yếu duy nhất là dễ bị giới hạn request (limit) hoặc khóa IP tạm thời nếu lạm dụng quét batch số lượng lớn trong thời gian ngắn.
+*   **`DeepSeek-OCR`**:
+    *   *Đặc điểm*: Model offline cực khủng, nặng, mạnh và cực kỳ ngon.
+    *   *Đánh giá*: Nhận diện text siêu tốt, là model offline hiếm hoi có khả năng sánh ngang với các mô hình ngôn ngữ lớn chạy online. Yêu cầu phần cứng: Cần tối thiểu **4GB VRAM** để chạy ổn định và mượt mà.
+*   **`PaddleOCR-VL`**:
+    *   *Đặc điểm*: Siêu phẩm offline gọn nhẹ nhưng sức mạnh đáng kinh ngạc.
+    *   *Đánh giá*: Tốc độ nhận diện nhanh như chớp, độ chính xác cực tốt. Đây là model tác giả yêu thích và sử dụng nhiều nhất. Điểm đặc biệt: Hiểu cực tốt văn bản xếp dọc đặc trưng của khu vực CJK (Trung - Nhật - Hàn). Cực kỳ thân thiện với phần cứng, chỉ cần **1GB VRAM** là chạy phăm phăm.
 
-### llama.cpp
+### 3. Trình Dịch Thuật (Translators)
+*   Không giới hạn backend dịch thuật, hỗ trợ hoàn toàn theo khả năng tài chính và nhu cầu cá nhân.
+*   Chỉ cần tương thích với chuẩn kết nối **OpenAI API** hoặc các API phổ biến (Gemini, DeepSeek, Google, NLLB, Baidu, Bing...).
 
-Nếu dùng OCR local qua server, bạn cần chuẩn bị:
+### 4. Trình Xóa Chữ Nền (Inpainting)
+*   **`LaMa Inpaint (Trained for Manga)`**:
+    *   *Đặc điểm*: Phiên bản đặc chế chuyên biệt cho cấu trúc nét vẽ, screentone và các đường line art của truyện tranh.
+    *   *Đánh giá*: Đỉnh cao của nghệ thuật xóa chữ. Từ khi tích hợp model này vào hệ thống, tác giả đã quyết định dừng việc tìm kiếm các model inpaint khác. Hiệu năng xử lý quá tốt, tẩy chữ sạch sẽ không tì vết mà lại cực kỳ nhẹ nhàng, chỉ tiêu tốn vỏn vẹn **200MB VRAM**.
 
-- `llama-server` tương thích;
-- binary trong `tools/llama.cpp/` hoặc đã thêm vào `PATH`;
-- model và mmproj đúng vị trí theo cấu hình trong GUI.
+---
 
-GUI hiện mặc định dùng:
+## 🔬 Kiến Trúc Kỹ Thuật Hệ Thống (Deep Technical Architecture)
 
-- thư mục `tools/llama.cpp`
-- server URL `http://127.0.0.1:8080`
+Để giúp các nhà phát triển và người dùng kỹ thuật hiểu sâu hơn về cơ chế hoạt động của repository:
 
-## Khởi chạy ứng dụng
+### 1. Mô hình Phân Tách Vai Trò (GUI vs Core)
+*   **Giao diện (mmt_gui/)**: Đóng vai trò là tầng hiển thị (Presentation Layer) điều phối trạng thái và tương tác người dùng. Giao diện được thiết kế dạng Stage-based (Panel rời cho từng bước), cho phép nạp/xuất trạng thái từ Cache Core.
+*   **Lõi Nghiệp Vụ (mmt_core/)**: Đóng vai trò điều phối pipeline (Orchestrator). Toàn bộ logic nghiệp vụ, quản lý cache, đọc ghi tệp tin, chuẩn hóa dữ liệu giữa các stage đều diễn ra tại đây, độc lập hoàn toàn với giao diện đồ họa.
+*   **Các Backend (detectors/, ocr/, inpainting/, translator/, text_rendering/)**: Được đóng gói thành các package độc lập, có thể tái sử dụng dễ dàng trong các dự án CLI hoặc ứng dụng khác mà không bị ràng buộc bởi PyQt6.
 
-Cách chạy nhanh trên Windows:
+### 2. Xử Lý Bất Đồng Bộ & Luồng Nền (Asynchronous Workers)
+Các tác vụ Deep Learning nặng (Detection, Inpaint, OCR) và gọi API dịch thuật (Translation) dễ gây nghẽn giao diện chính (Main GUI Thread). 
+*   Hệ thống giải quyết triệt để bằng cách đóng gói các tác vụ này vào các **`QThread Workers`** chạy nền dưới sự quản lý của `mmt_gui/workers/`.
+*   Tương tác giữa luồng nền và giao diện được thực hiện an toàn qua hệ thống **Signals & Slots** của PyQt6, đảm bảo ứng dụng luôn mượt mà, phản hồi ngay lập tức và hiển thị thanh tiến trình trực quan.
 
-```bat
-PyQt_run.bat
-```
+### 3. Các Thư Viện Học Máy Cốt Lõi (AI Stack)
+Hệ thống sử dụng các thư viện AI hàng đầu hiện nay, tối ưu hóa chạy tốt trên cả CUDA (GPU Nvidia) lẫn CPU:
+*   `torch` & `torchvision`: Nền tảng tensor chạy các model deep learning.
+*   `ultralytics`: Sử dụng trực tiếp để suy luận các model YOLO và RT-DETR phát hiện bong bóng thoại.
+*   `transformers`: Tải và chạy các mô hình ngôn ngữ hoặc OCR offline.
+*   `llama.cpp` wrapper: Tương tác trực tiếp với llama-server để xử lý cục bộ siêu tốc.
 
-Hoặc chạy trực tiếp:
+---
 
-```powershell
-.venv\Scripts\Activate.ps1
-python -m mmt_gui.main
-```
+## 📂 Cách Tổ Chức Một Project Tiêu Chuẩn
 
-Đây là entrypoint chính của ứng dụng hiện tại.
-
-## Hướng dẫn sử dụng
-
-### 1. Tạo hoặc mở project
-
-Khi mở ứng dụng:
-
-- tạo project mới trong một thư mục riêng; hoặc
-- mở `project.json` của project đã có.
-
-Mỗi project được tổ chức thành:
-
-- `source/`: ảnh gốc đã import
-- `cache/`: dữ liệu trung gian theo từng stage
-
-### 2. Import ảnh
-
-Trong stage Project:
-
-- import một hoặc nhiều ảnh truyện;
-- ứng dụng sẽ copy ảnh vào `source/`;
-- danh sách trang sẽ được lưu trong `project.json`.
-
-### 3. Cấu hình OCR
-
-Trong stage OCR hoặc phần cấu hình liên quan:
-
-- chọn OCR provider;
-- nếu dùng OCR local, kiểm tra server URL, model path và thư mục `llama.cpp`;
-- nếu dùng Chrome Lens, cấu hình đường dẫn Chrome hoặc profile nếu cần.
-
-### 4. Cấu hình translator
-
-Trong stage Translation:
-
-- chọn translator phù hợp;
-- nhập API key nếu backend yêu cầu;
-- nhập URL/model nếu dùng local LLM hoặc OpenAI-compatible endpoint;
-- cấu hình prompt style, custom prompt hoặc ghi chú project nếu cần.
-
-### 5. Chạy từng stage riêng lẻ
-
-Bạn có thể chạy riêng từng bước:
-
-- Detection
-- OCR Prepare
-- OCR
-- Translation
-- Inpaint
-- Render
-- Export
-
-Cách này phù hợp khi muốn kiểm tra chất lượng và can thiệp thủ công giữa pipeline.
-
-### 6. Chạy pipeline một chạm
-
-Ứng dụng hỗ trợ luồng process từ:
-
-- Detection
-- OCR Prepare
-- OCR
-- Translation Init
-- Translation
-- Mask Prepare
-- Inpaint
-- Render Prepare
-- Render
-
-Luồng này phù hợp khi đã cấu hình OCR và translator xong, và muốn xử lý nhanh cho một trang hoặc cả project.
-
-### 7. Chỉnh dữ liệu trung gian
-
-Workflow desktop cho phép can thiệp trực tiếp ở các stage quan trọng:
-
-- loại bỏ hoặc khôi phục detection item;
-- sửa OCR item;
-- sửa text OCR nhận diện sai;
-- sửa text dịch;
-- loại bỏ hoặc khôi phục render item;
-- xem preview theo từng bước.
-
-Đây là một phần quan trọng của workflow bán tự động.
-
-### 8. Export kết quả
-
-Sau khi render:
-
-- mở stage Export;
-- chọn phạm vi trang;
-- xuất ảnh đầu ra theo cấu hình hiện tại.
-
-## OCR và translator đang hỗ trợ
-
-### OCR provider
-
-Các OCR provider đang được desktop app hỗ trợ:
-
-- `PaddleOCR-VL Local`
-- `DeepSeek OCR (llama.cpp)`
-- `Chrome Lens`
-
-Khuyến nghị thực tế:
-
-- `PaddleOCR-VL Local` là lựa chọn local chính.
-- `Chrome Lens` phù hợp làm fallback.
-
-### Translator
-
-Các translator hiện có trong ứng dụng:
-
-- Gemini
-- Local LLM
-- DeepSeek
-- OpenAI Compatible
-- Google
-- NLLB
-- Baidu
-- Bing
-
-Các lựa chọn thường hữu ích nhất cho workflow hiện tại:
-
-- Local LLM
-- OpenAI Compatible
-- DeepSeek
-- Gemini
-
-## Cấu trúc project làm việc
-
-Một project điển hình có dạng:
+Khi bạn tạo một project mới từ GUI, ứng dụng sẽ tự động sinh ra cấu trúc thư mục sạch đẹp như sau tại thư mục project của bạn:
 
 ```text
-MyProject/
-├─ project.json
-├─ source/
-│  ├─ 001.jpg
-│  ├─ 002.jpg
-│  └─ ...
-└─ cache/
-   ├─ detection/
-   ├─ ocr/
-   ├─ ocr_crops/
-   ├─ translation/
-   ├─ inpaint/
-   ├─ render/
-   ├─ render_sprites/
-   └─ masks/
+Tên_Project_Của_Bạn/
+├── project.json                 # Trạng thái, danh sách trang và liên kết cấu hình
+├── source/                      # Thư mục chứa các ảnh manga gốc đã import
+└── cache/                       # Toàn bộ "bộ não" dữ liệu trung gian của bạn
+   ├── detection/                # Tọa độ các hộp thoại và layout phát hiện được
+   ├── ocr/                      # Văn bản gốc đã nhận diện kèm tọa độ chi tiết
+   ├── ocr_crops/                # Các ảnh cắt nhỏ chứa chữ phục vụ OCR
+   ├── translation/              # Kết quả dịch thuật gốc và bản dịch tiếng Việt
+   ├── masks/                    # File ảnh mặt nạ đen trắng phục vụ xóa chữ
+   ├── inpaint/                  # Ảnh sạch sau khi đã tẩy toàn bộ chữ gốc
+   ├── render/                   # Cấu hình dàn trang, font chữ và màu sắc render
+   └── render_sprites/           # Ảnh sprite các khối chữ được render đè lên
 ```
 
-Ý nghĩa:
+> [!IMPORTANT]
+> **KHÔNG XÓA THƯ MƯC `cache/`**
+> Thư mục `cache/` là linh hồn giúp bạn tiếp tục làm việc ở lần mở app sau mà không bị mất tiến độ cũ. Nếu bạn đổi cấu hình dịch thuật hoặc chỉnh sửa chữ thủ công, hệ thống sẽ tự động cập nhật các file cache tương ứng ở các stage phía sau một cách thông minh.
 
-- `project.json`: trạng thái project và danh sách trang
-- `source/`: ảnh nguồn
-- `cache/`: dữ liệu trung gian của từng stage
+## 💻 Ghi Chú Cho Nhà Phát Triển (Developer Notes)
 
-Thiết kế này giúp:
+Nếu bạn muốn tham khảo sâu hơn hoặc tiếp tục phát triển codebase của **Manga Translator Studio**:
+*   **Trục chạy chính**: Tránh chỉnh sửa trực tiếp các script đơn lẻ ở thư mục gốc (như `add_text.py`, `detect_bubbles.py`, `process_bubble.py`). Chúng chỉ đóng vai trò làm mã tham chiếu kỹ thuật hoặc tool helper cũ. Luồng chạy thực tế của ứng dụng hoàn toàn nằm trong gói **`mmt_gui/`** (giao diện điều khiển) và **`mmt_core/`** (lõi xử lý và quản lý cache).
+*   **Cơ chế đa luồng (Multi-threading)**: Khi tích hợp thêm OCR hoặc Translator mới, hãy kế thừa lớp `QThread` hoặc sử dụng cơ chế Worker của `mmt_gui/workers/` để đảm bảo tác vụ nặng không gây nghẽn luồng xử lý giao diện chính (Main UI Thread).
 
-- chạy lại có chọn lọc;
-- debug thuận tiện;
-- tiếp tục chỉnh sửa project mà không mất kết quả trước đó.
+---
 
-## Log, cache và dữ liệu sinh ra
+## 🛠️ Xử Lý Sự Cố Thường Gặp (Troubleshooting)
 
-Ứng dụng sinh ra các loại dữ liệu chính:
+Trong quá trình vận hành buồng lái, nếu gặp sự cố kỹ thuật, bạn có thể tham khảo các bước chẩn đoán nhanh dưới đây:
 
-- `logs/`: log runtime cấp workspace
-- `cache/`: cache theo từng stage
-- crop OCR
-- mask inpaint
-- sprite render
-- ảnh render cuối
+### 1. Ứng dụng không khởi chạy được hoặc crash ngay khi mở
+*   **Nguyên nhân**: Môi trường ảo chưa được kích hoạt đúng hoặc thiếu thư viện.
+*   **Cách khắc phục**:
+    1.  Đảm bảo bạn đang sử dụng **Python 3.11** (chạy `python --version` để kiểm tra).
+    2.  Xóa thư mục `.venv` cũ và cài đặt lại từ đầu theo đúng hướng dẫn PowerShell/CMD.
+    3.  Kiểm tra logs chi tiết trong thư mục `logs/` cấp workspace để tìm nguyên nhân crash.
 
-Cache là một phần trọng yếu của workflow. Không nên xóa toàn bộ `cache/` nếu bạn còn muốn tiếp tục làm việc trên project hiện tại.
+### 2. OCR Local (DeepSeek-OCR qua llama.cpp) báo lỗi hoặc không hoạt động
+*   **Nguyên nhân**: Lỗi cấu hình đường dẫn hoặc cổng mạng của server cục bộ.
+*   **Cách khắc phục**:
+    1.  Đảm bảo tệp nhị phân `llama-server` (hoặc `llama-server.exe` trên Windows) tồn tại trong thư mục `tools/llama.cpp/` hoặc đã được thêm vào biến môi trường `PATH`.
+    2.  Kiểm tra file model GGUF và tệp mmproj tương ứng có khớp định dạng và đúng vị trí cấu hình trên giao diện hay không.
+    3.  Đảm bảo cổng mặc định `8080` không bị ứng dụng khác chiếm dụng (chạy `netstat -ano | findstr 8080` trên Windows để kiểm tra).
 
-## Ghi chú phát triển
+### 3. Tốc độ xử lý quá chậm (Detection, Inpaint, OCR)
+*   **Nguyên nhân**: Hệ thống đang chạy bằng CPU hoặc cấu hình model quá nặng.
+*   **Cách khắc phục**:
+    1.  Kiểm tra xem PyTorch đã nhận GPU CUDA chưa bằng cách chạy lệnh: `python -c "import torch; print(torch.cuda.is_available())"`.
+    2.  Nếu hiển thị `False`, bạn cần cài đặt phiên bản PyTorch hỗ trợ CUDA tương thích với driver card đồ họa của bạn.
+    3.  Nếu buộc phải dùng CPU, hãy ưu tiên các model siêu nhẹ như **PaddleOCR-VL** thay vì các model offline hạng nặng.
 
-Hiện tại:
+### 4. Kết quả nhận diện chữ hoặc render chữ lên ảnh chưa ưng ý
+*   **Cách khắc phục**:
+    1.  Sử dụng **Trình Soạn Thảo Tương Tác** của GUI để vẽ lại/điều chỉnh các hộp thoại (box) bị lệch ở bước Detection trước khi chạy OCR.
+    2.  Sửa đổi thủ công các đoạn văn bản OCR bị nhận diện sai chính tả trước khi gửi đi dịch để AI có ngữ cảnh tốt nhất.
+    3.  Đảm bảo font chữ bạn muốn sử dụng đã được copy vào thư mục `fonts/` và được cấu hình đúng trong phần Render.
 
-- desktop app là đường chạy chính;
-- `mmt_core` là trung tâm điều phối pipeline;
-- nhiều backend trong `detectors/`, `ocr/`, `inpainting/`, `translator/`, `text_rendering/` đang được dùng trực tiếp;
-- một số script ở thư mục gốc tồn tại như helper hoặc mã tham chiếu, không phải luồng chạy chính.
+### 5. Lệch dữ liệu Cache hoặc kết quả không đồng bộ
+*   **Nguyên nhân**: Bạn đã chỉnh sửa thủ công dữ liệu ở stage trước nhưng chưa chạy lại (re-run) các stage phía sau.
+*   **Cách khắc phục**: Khi bạn thay đổi mạnh cấu hình hoặc vẽ lại box detection thủ công, hãy nhớ chạy lại các bước tiếp theo (OCR -> Translation -> Render) để cập nhật và đồng bộ tệp tin cache.
 
-Nếu tiếp tục phát triển repo này, hướng nên tập trung là:
+---
 
-- cải tiến `mmt_gui/`;
-- tiếp tục chuẩn hóa `mmt_core/`;
-- giữ backend dùng chung ổn định và tách biệt khỏi GUI;
-- chỉ dọn các script gốc khi đã xác nhận không còn phụ thuộc nội bộ.
+## 🧠 Triết Lý Thiết Kế
 
-## Sự cố thường gặp
+> *"Dịch thuật truyện tranh không chỉ thuần túy là dịch chữ. Đó là nghệ thuật tái tạo lại linh hồn của tác phẩm dưới một ngôn ngữ mới, tôn trọng tuyệt đối từng nét cọ, từng mảng màu và phong cách dàn trang của tác giả gốc."*
 
-### Không chạy được ứng dụng
+**Manga Translator Studio** sinh ra để xóa bỏ sự thống trị của những công cụ dịch tự động cẩu thả đang tàn phá giá trị thẩm mỹ của manga. Bằng cách trao cho dịch giả quyền kiểm soát tối thượng ở từng giai đoạn xử lý, kết hợp cùng sức mạnh tự động hóa ưu việt của AI, chúng tôi tin rằng bạn sẽ tạo nên những tác phẩm Việt hóa hoàn hảo nhất, mang lại trải nghiệm đọc truyện tuyệt vời nhất cho độc giả nước nhà.
 
-Kiểm tra:
+---
 
-- đã tạo `.venv`
-- đã cài `requirements.txt`
-- đang dùng Python 3.11
-
-### OCR local không hoạt động
-
-Kiểm tra:
-
-- `llama-server` có tồn tại không
-- `server_url` có đúng không
-- model và mmproj có đúng vị trí không
-- cổng đang dùng có bị ứng dụng khác chiếm không
-
-### Detection, OCR hoặc inpaint quá chậm
-
-Nguyên nhân thường gặp:
-
-- chạy CPU thay vì GPU
-- model lớn
-- project nhiều trang
-- OCR server local chưa tối ưu cấu hình
-
-### Kết quả OCR hoặc render chưa tốt
-
-Nên thử:
-
-- chỉnh lại detection item
-- sửa OCR thủ công trước khi dịch
-- đổi OCR provider
-- đổi translator
-- kiểm tra font đang dùng
-
-### Cache bị lệch với trạng thái hiện tại
-
-Khi thay đổi mạnh cấu hình hoặc chỉnh sửa detection/OCR thủ công, có thể cần chạy lại các stage phía sau để đồng bộ kết quả.
+Chúc bạn có những giờ phút dịch thuật thật thăng hoa bên những bộ truyện yêu thích cùng **Manga Translator Studio**! 🚀
